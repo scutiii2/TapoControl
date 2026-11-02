@@ -119,6 +119,12 @@ class Theme(QObject):
             QToolButton::menu-indicator {{ image: none; }}
             QLineEdit, QDoubleSpinBox {{ background: {c.surface}; color: {c.text}; border: 1px solid {c.control};
                 border-radius: 6px; padding: 9px; min-height: 18px; selection-background-color: {c.accent}; }}
+            QComboBox {{ background: {c.surface}; color: {c.text}; border: 1px solid {c.control};
+                border-radius: 6px; padding: 8px 12px; min-height: 18px; min-width: 120px; }}
+            QComboBox:focus, QComboBox:on {{ border-color: {c.accent}; }}
+            QComboBox::drop-down {{ border: none; width: 24px; }}
+            QComboBox QAbstractItemView {{ background: {c.surface}; border: 1px solid {c.border};
+                selection-background-color: {c.selected}; selection-color: {c.text}; outline: none; }}
             QLineEdit:focus, QDoubleSpinBox:focus {{ border-color: {c.accent}; }}
             QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{ width: 20px; }}
             QTabWidget::pane {{ border: none; border-top: 1px solid {c.border}; top: -1px; }}

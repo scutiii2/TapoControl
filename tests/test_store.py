@@ -111,3 +111,20 @@ def test_old_devices_table_gets_device_id_column(tmp_path):
     s = Store(tmp_path / "old.db")
     assert s.devices() == [DeviceInfo("1.1.1.1", "a", "P110", "")]
     s.close()
+
+
+def test_daily_energy_saved_replaced_and_follows_device(store):
+    from datetime import date
+
+    store.save_devices([DeviceInfo("1.1.1.1", "Desk", "P110", "abc")])
+    store.save_daily("1.1.1.1", [(date(2026, 1, 2), 5), (date(2026, 1, 1), 3)])
+    store.save_daily("1.1.1.1", [(date(2026, 1, 2), 9)])  # plug's value wins
+    assert store.daily("1.1.1.1") == [(date(2026, 1, 1), 3), (date(2026, 1, 2), 9)]
+    store.save_devices([DeviceInfo("1.1.1.7", "Desk", "P110", "abc")])
+    assert store.daily("1.1.1.1") == [] and len(store.daily("1.1.1.7")) == 2
+
+
+def test_backfill_flag(store):
+    assert not store.backfilled("1.1.1.1")
+    store.set_backfilled("1.1.1.1")
+    assert store.backfilled("1.1.1.1")

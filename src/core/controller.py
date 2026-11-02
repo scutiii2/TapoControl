@@ -32,6 +32,26 @@ def daily_rows(start: date, entries: list[int], today: date) -> list[tuple[date,
     return [r for r in rows if r[0] <= today]
 
 
+def previous_quarter(start: date) -> date:
+    """First day of the quarter before the one starting at `start`."""
+    return quarter_start(start - timedelta(days=1))
+
+
+def trim_leading_zeros(rows: list[tuple[date, int]]) -> list[tuple[date, int]]:
+    """Days before the plug first measured anything come back as 0; they are not usage."""
+    first = next((i for i, (_, wh) in enumerate(rows) if wh), len(rows))
+    return rows[first:]
+
+
+def monthly_totals(rows: list[tuple[date, int]]) -> list[tuple[date, int]]:
+    """Sum daily Wh per calendar month, keyed by the month's first day."""
+    totals: dict[date, int] = {}
+    for day, wh in rows:
+        key = day.replace(day=1)
+        totals[key] = totals.get(key, 0) + wh
+    return sorted(totals.items())
+
+
 def is_p110(model: str | None) -> bool:
     return (model or "").upper().startswith("P110")
 
@@ -118,5 +138,28 @@ class TapoController:
         """Wh per day for the current quarter."""
         today = date.today()
         start = quarter_start(today)
+        return await self._quarter(ip, start, today)
+
+    async def _quarter(self, ip: str, start: date, today: date) -> list[tuple[date, int]]:
         data = await self._call(ip, lambda plug: plug.get_energy_data(EnergyDataInterval.Daily, start))
-        return daily_rows(start, list(data.entries), today)
+        quarter_end = quarter_start(start + timedelta(days=95)) - timedelta(days=1)
+        return daily_rows(start, list(data.entries), min(today, quarter_end))
+
+    @_mapped
+    async def full_history(self, ip: str, max_quarters: int = 12) -> list[tuple[date, int]]:
+        """Daily Wh from every quarter the plug still remembers, oldest first. Stops at the first empty quarter."""
+        today = date.today()
+        start = quarter_start(today)
+        rows = await self._quarter(ip, start, today)  # current quarter: errors propagate
+        for _ in range(max_quarters - 1):
+            start = previous_quarter(start)
+            try:
+                older = await self._quarter(ip, start, today)
+            except AuthError:
+                raise
+            except Exception:
+                break  # the plug does not hold data this far back
+            if not any(wh for _, wh in older):
+                break
+            rows = older + rows
+        return trim_leading_zeros(rows)

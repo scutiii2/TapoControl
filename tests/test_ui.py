@@ -41,6 +41,10 @@ class FakeController:
         self.calls.append(("history", ip))
         return [(date(2026, 11, 1), 420)]
 
+    async def full_history(self, ip):
+        self.calls.append(("history", ip))
+        return [(date(2026, 11, 1), 420)]
+
 
 class FakeRunner:
     def __init__(self):
@@ -268,3 +272,16 @@ def test_close_hides_to_tray_and_show_restores(window, app):
     assert not w.isVisible()
     w._show_from_tray()
     assert w.isVisible()
+
+
+def test_energy_history_is_stored_and_range_switches_to_monthly(window):
+    w, runner, controller = window
+    panel = w._history
+    panel.load(controller, "192.168.1.2", "Desk")
+    runner.finish()
+    assert w._store.backfilled("192.168.1.2")
+    assert w._store.daily("192.168.1.2") == [(date(2026, 11, 1), 420)]
+    panel._range.setCurrentIndex(2)
+    assert panel._bars._monthly
+    panel.load(controller, "192.168.1.2", "Desk")  # second open: stored rows still shown
+    assert panel._rows == []  # cleared until the plug answers

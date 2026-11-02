@@ -4,7 +4,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from core.controller import AuthError, TapoController
+from core.controller import AuthError, TapoController, monthly_totals, previous_quarter, quarter_start, trim_leading_zeros
 
 
 class FakePlug:
@@ -113,3 +113,35 @@ def test_expired_session_relogs_in_once():
     with pytest.raises(Exception, match="SESSION_INVALID"):
         asyncio.run(c.snapshot("1.1.1.1"))
     assert client.logins == 2  # one retry, then give up
+
+
+def test_full_history_walks_back_quarters_and_stops_at_empty():
+    this_q = quarter_start(date.today())
+    last_q = previous_quarter(this_q)
+
+    class Plug(FakePlug):
+        async def get_energy_data(self, interval, start_date):
+            entries = {this_q: [10, 20, 30], last_q: [0, 0, 5, 6]}.get(start_date, [0] * 90)
+            return NS(entries=entries, start_date_time=start_date)
+
+    rows = asyncio.run(controller(Plug()).full_history("1.1.1.1"))
+    assert rows[0] == (last_q.replace(day=3), 5)  # leading zeros trimmed
+    assert (last_q.replace(day=4), 6) in rows
+    assert all(a[0] < b[0] for a, b in zip(rows, rows[1:]))
+
+
+def test_full_history_keeps_current_quarter_when_older_fails():
+    class Plug(FakePlug):
+        async def get_energy_data(self, interval, start_date):
+            if start_date != quarter_start(date.today()):
+                raise Exception("no data")
+            return NS(entries=[10], start_date_time=start_date)
+
+    assert asyncio.run(controller(Plug()).full_history("1.1.1.1")) == [(quarter_start(date.today()), 10)]
+
+
+def test_monthly_totals_and_trim():
+    rows = [(date(2026, 1, 30), 1), (date(2026, 1, 31), 2), (date(2026, 2, 1), 4)]
+    assert monthly_totals(rows) == [(date(2026, 1, 1), 3), (date(2026, 2, 1), 4)]
+    assert trim_leading_zeros([(date(2026, 1, 1), 0), (date(2026, 1, 2), 5), (date(2026, 1, 3), 0)]) == [
+        (date(2026, 1, 2), 5), (date(2026, 1, 3), 0)]

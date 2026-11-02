@@ -1,14 +1,17 @@
 """Embedded Energy tab: totals, tariff and daily history for the selected plug."""
-from datetime import date
+from datetime import date, timedelta
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from core.async_runner import AsyncRunner
-from core.controller import AuthError, EnergySummary, TapoController
+from core.controller import AuthError, EnergySummary, TapoController, monthly_totals, quarter_start
 from core.store import Store
 from ui.charts import DailyBars
 from ui.theme import energy_error, theme
+
+
+RANGES = ("This quarter", "Last 12 months", "All time")
 
 
 class HistoryPanel(QWidget):
@@ -23,6 +26,8 @@ class HistoryPanel(QWidget):
         self._revision = 0
         self._ip: str | None = None
         self._controller: TapoController | None = None
+        self._rows: list[tuple[date, int]] = []
+        self._backfilling = False
 
         self._price = QDoubleSpinBox(decimals=4, maximum=1000, value=store.price_per_kwh())
         self._price.setMinimumWidth(140)
@@ -45,6 +50,11 @@ class HistoryPanel(QWidget):
         tariff.setBuddy(self._price)
         header.addWidget(tariff)
         header.addWidget(self._price)
+        self._range = QComboBox()
+        self._range.addItems(RANGES)
+        self._range.setAccessibleName("History range")
+        self._range.currentIndexChanged.connect(self._render_history)
+        header.addWidget(self._range)
         totals = QHBoxLayout()
         self._today, self._today_cost = self._total_card(totals, "TODAY")
         self._month, self._month_cost = self._total_card(totals, "THIS MONTH")
@@ -105,6 +115,7 @@ class HistoryPanel(QWidget):
         self._month.setText("—")
         self._today_cost.setText("Estimated cost —")
         self._month_cost.setText("Estimated cost —")
+        self._rows = []
         self._bars.show_rows([])
         self._summary_error.hide()
         self._history_error.hide()
@@ -134,7 +145,9 @@ class HistoryPanel(QWidget):
                 self._on_history(result, error)
 
         self._runner.submit(controller.energy(ip), summary)
-        self._runner.submit(controller.daily_history(ip), history)
+        # One-off backfill of every quarter the plug remembers; afterwards the current quarter is enough.
+        self._backfilling = not self._store.backfilled(ip)
+        self._runner.submit(controller.full_history(ip) if self._backfilling else controller.daily_history(ip), history)
 
     def _cost(self, wh: int) -> str:
         return f"{wh / 1000 * self._price.value():.2f}"
@@ -165,9 +178,25 @@ class HistoryPanel(QWidget):
         if error:
             self._show_error(self._history_error, error)
         else:
-            self._bars.show_rows(rows or [])
-            self._empty.setText("No daily energy data is available for this plug yet.")
-            self._empty.setVisible(not rows)
+            self._store.save_daily(self._ip, rows or [])
+            if self._backfilling:
+                self._store.set_backfilled(self._ip)
+        # Stored days stay visible even when the plug is unreachable.
+        self._rows = self._store.daily(self._ip)
+        self._render_history()
+
+    def _render_history(self) -> None:
+        if self._ip is None:
+            return
+        choice = self._range.currentIndex()
+        rows = self._rows
+        if choice == 0:
+            rows = [r for r in rows if r[0] >= quarter_start(date.today())]
+        elif choice == 1:
+            rows = [r for r in rows if r[0] >= (date.today().replace(day=1) - timedelta(days=335)).replace(day=1)]
+        self._bars.show_rows(monthly_totals(rows) if choice else rows, monthly=bool(choice))
+        self._empty.setText("No energy data is available for this plug yet.")
+        self._empty.setVisible(not rows and not self._history_error.isVisible())
 
     def _show_error(self, label: QLabel, error: BaseException) -> None:
         label.setText(energy_error(error))
