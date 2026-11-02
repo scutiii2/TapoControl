@@ -52,6 +52,21 @@ def _mapped(fn):
 class TapoController:
     def __init__(self, email: str, password: str, client=None):
         self._client = client or ApiClient(email, password)
+        # Each p110() call is a fresh login, and the plug locks itself after failed logins,
+        # so log in once per plug and run its calls one at a time.
+        self._plugs: dict = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    async def _call(self, ip: str, fn):
+        """Run `fn(plug)` on a cached handler; drop the handler on error so the next call logs in again."""
+        async with self._locks.setdefault(ip, asyncio.Lock()):
+            try:
+                if ip not in self._plugs:
+                    self._plugs[ip] = await self._client.p110(ip)
+                return await fn(self._plugs[ip])
+            except Exception:
+                self._plugs.pop(ip, None)
+                raise
 
     async def _find_ips(self, timeout: int) -> list[str]:
         """Broadcast discovery needs no credentials; python-kasa only finds IPs, tapo does the control."""
@@ -71,34 +86,34 @@ class TapoController:
         ips = await self._find_ips(timeout)
 
         async def info(ip: str) -> DeviceInfo:
-            i = await (await self._client.p110(ip)).get_device_info()
+            i = await self._call(ip, lambda plug: plug.get_device_info())
             return DeviceInfo(ip, i.nickname or ip, i.model, i.device_id)
 
         return sorted(await asyncio.gather(*map(info, ips)), key=lambda d: d.alias)
 
     @_mapped
     async def set_power(self, ip: str, on: bool) -> None:
-        plug = await self._client.p110(ip)
-        await (plug.on() if on else plug.off())
+        await self._call(ip, lambda plug: plug.on() if on else plug.off())
 
     @_mapped
     async def snapshot(self, ip: str) -> tuple[bool, float]:
         """Return (is_on, watts)."""
-        plug = await self._client.p110(ip)
-        info, power = await asyncio.gather(plug.get_device_info(), plug.get_current_power())
+
+        async def read(plug):
+            return await asyncio.gather(plug.get_device_info(), plug.get_current_power())
+
+        info, power = await self._call(ip, read)
         return info.device_on, float(power.current_power)
 
     @_mapped
     async def energy(self, ip: str) -> EnergySummary:
-        plug = await self._client.p110(ip)
-        usage = await plug.get_energy_usage()
+        usage = await self._call(ip, lambda plug: plug.get_energy_usage())
         return EnergySummary(int(usage.today_energy), int(usage.month_energy))
 
     @_mapped
     async def daily_history(self, ip: str) -> list[tuple[date, int]]:
         """Wh per day for the current quarter."""
-        plug = await self._client.p110(ip)
         today = date.today()
         start = quarter_start(today)
-        data = await plug.get_energy_data(EnergyDataInterval.Daily, start)
+        data = await self._call(ip, lambda plug: plug.get_energy_data(EnergyDataInterval.Daily, start))
         return daily_rows(start, list(data.entries), today)

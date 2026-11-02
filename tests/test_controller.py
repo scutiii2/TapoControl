@@ -41,8 +41,10 @@ class FakePlug:
 class FakeClient:
     def __init__(self, plug):
         self.plug = plug
+        self.logins = 0
 
     async def p110(self, ip):
+        self.logins += 1
         return self.plug
 
 
@@ -83,3 +85,22 @@ def test_energy_and_history():
     rows = asyncio.run(c.daily_history("1.1.1.1"))
     assert rows[0][1] == 100  # day 2 is dropped when today is the quarter's first day
     assert all(isinstance(d, date) for d, _ in rows)
+
+
+def test_logs_in_once_per_plug_and_again_after_error():
+    plug = FakePlug()
+    client = FakeClient(plug)
+    c = TapoController("e", "p", client=client)
+
+    async def run():
+        await asyncio.gather(c.snapshot("1.1.1.1"), c.energy("1.1.1.1"), c.daily_history("1.1.1.1"))
+        await c.snapshot("1.1.1.1")
+        assert client.logins == 1
+        plug.fail = "boom"
+        with pytest.raises(Exception, match="boom"):
+            await c.snapshot("1.1.1.1")
+        plug.fail = None
+        await c.snapshot("1.1.1.1")
+
+    asyncio.run(run())
+    assert client.logins == 2
