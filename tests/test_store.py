@@ -136,3 +136,17 @@ def test_power_samples_recent_and_prune(store):
     assert store.recent_samples("1.1.1.1", 150.0) == [(200.0, 20.0), (300.0, 30.0)]
     store.prune_samples(250.0)
     assert store.recent_samples("1.1.1.1", 0.0) == [(300.0, 30.0)]
+
+
+def test_profile_learns_from_samples_and_from_old_ones(store, tmp_path):
+    from core.profile import slot_key
+
+    ts = 1_800_000_000.0
+    for watts in (10.0, 30.0):
+        store.add_sample("1.1.1.1", ts, watts)
+    assert store.profile("1.1.1.1")[slot_key(ts)] == (20.0, 2)
+    # samples stored before the profile table existed are folded in on open
+    store._db.execute("DELETE FROM power_profile")
+    store._db.commit()
+    store._seed_profile()
+    assert store.profile("1.1.1.1")[slot_key(ts)] == (20.0, 2)

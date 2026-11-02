@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from core.async_runner import AsyncRunner
 from core.controller import AuthError, TapoController, merge_power
+from core.profile import fill_gaps
 from core.store import DeviceInfo, Store
 from ui.charts import LiveChart
 from ui.history_dialog import HistoryPanel
@@ -56,6 +57,7 @@ class MainWindow(QMainWindow):
         self._samples: dict[str, deque[float]] = {}
         self._times: dict[str, deque[float]] = {}
         self._long: dict[str, list[tuple[float, float]]] = {}  # plug-stored 5-minute averages
+        self._profiles: dict[str, tuple[float, dict]] = {}
         self._long_fetched: dict[str, tuple[int, float]] = {}  # ip -> (hours, monotonic time)
         self._failures: dict[str, int] = {}
         self._last_rescan = 0.0
@@ -136,7 +138,9 @@ class MainWindow(QMainWindow):
         chart_layout.setContentsMargins(0, 0, 0, 0)
         chart_layout.setSpacing(6)
         chart_head = QHBoxLayout()
-        chart_head.addStretch(1)
+        self._chart_note = QLabel()
+        self._chart_note.setProperty("tone", "muted")
+        chart_head.addWidget(self._chart_note, 1)
         chart_head.addWidget(self._window)
         chart_layout.addLayout(chart_head)
         chart_layout.addWidget(self._chart, 1)
@@ -499,6 +503,13 @@ class MainWindow(QMainWindow):
         self._fetch_long()
         self._render_chart()
 
+    def _profile(self, ip: str) -> dict:
+        """The plug's typical day, re-read at most once a minute."""
+        cached = self._profiles.get(ip)
+        if cached is None or time.monotonic() - cached[0] > 60:
+            cached = self._profiles[ip] = (time.monotonic(), self._store.profile(ip))
+        return cached[1]
+
     def _has_gap(self, ip: str) -> bool:
         times = list(self._times.get(ip, ()))
         return any(b - a > 2.5 * REFRESH_MS / 1000 for a, b in zip(times, times[1:]))
@@ -516,8 +527,15 @@ class MainWindow(QMainWindow):
         self._long_fetched[ip] = (hours, time.monotonic())
 
         def done(result, error):
-            if not error:  # unsupported or failing history leaves the chart on our own readings
-                self._long[ip] = result or []
+            if ip != self._selected_ip():
+                return
+            self._chart_note.setToolTip(str(error) if error else "")
+            if error or not result:
+                # Unsupported or failing history: the chart keeps our own readings plus the learned pattern.
+                self._chart_note.setText("The plug has no stored power history, so dashed parts are estimated from its usual day.")
+            else:
+                self._chart_note.setText("")
+                self._long[ip] = result
                 self._render_chart()
 
         self._submit(self._controller.power_history(ip, hours), done)
@@ -533,10 +551,17 @@ class MainWindow(QMainWindow):
             points = merge_power(self._long.get(ip, []), own)
             peak = max((w for _, w in points), default=0)
             title = f"{name} · average watts · peak {peak:.1f} W" if points else f"{name} - average watts"
-            self._chart.show_samples([w for _, w in points], title, [t for t, _ in points], span=span, interval=300)
+            estimates = fill_gaps(points, [], self._profile(ip), 450)
+            self._chart.show_samples(
+                [w for _, w in points], title, [t for t, _ in points], span=span, interval=300, estimates=estimates
+            )
             return
         if name and samples:
             title = f"{name} · now {samples[-1]:.1f} W · peak {max(samples):.1f} W"
         else:
             title = f"{name} - live watts" if name else "Select a plug"
-        self._chart.show_samples(samples, title, self._times.get(ip), estimates=self._long.get(ip, ()))
+        times = self._times.get(ip)
+        estimates = list(self._long.get(ip, ()))
+        if samples and times:
+            estimates += fill_gaps(list(zip(times, samples)), estimates, self._profile(ip), 2.5 * REFRESH_MS / 1000)
+        self._chart.show_samples(samples, title, times, estimates=estimates)

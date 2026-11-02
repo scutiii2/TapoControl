@@ -7,6 +7,8 @@ from pathlib import Path
 
 import keyring
 
+from core.profile import slot_key
+
 SERVICE = "TapoControl"
 
 
@@ -36,10 +38,14 @@ class Store:
             # Live watts readings so the live chart survives a restart; pruned to recent days.
             "CREATE TABLE IF NOT EXISTS power_samples (ip TEXT NOT NULL, ts REAL NOT NULL, watts REAL NOT NULL);"
             "CREATE INDEX IF NOT EXISTS power_samples_ip_ts ON power_samples (ip, ts);"
+            # Running mean of watts per plug, day type and 5-minute slot: the plug's typical day.
+            "CREATE TABLE IF NOT EXISTS power_profile (ip TEXT NOT NULL, weekend INTEGER NOT NULL, slot INTEGER NOT NULL, "
+            "total REAL NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (ip, weekend, slot));"
             "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
         )
         if "device_id" not in [r[1] for r in self._db.execute("PRAGMA table_info(devices)")]:
             self._db.execute("ALTER TABLE devices ADD COLUMN device_id TEXT NOT NULL DEFAULT ''")
+        self._seed_profile()
 
     def save_account(self, email: str, password: str) -> None:
         with self._db:
@@ -58,7 +64,7 @@ class Store:
             for d in devices:
                 # Same device at a new IP: its nickname moves with it.
                 if d.device_id in old_ips and old_ips[d.device_id] != d.ip:
-                    for table in ("nicknames", "daily_energy", "power_samples"):
+                    for table in ("nicknames", "daily_energy", "power_samples", "power_profile"):
                         self._db.execute(f"UPDATE OR REPLACE {table} SET ip = ? WHERE ip = ?", (d.ip, old_ips[d.device_id]))
             self._db.execute("DELETE FROM devices")
             self._db.executemany(
@@ -90,8 +96,31 @@ class Store:
             self._db.execute("INSERT OR REPLACE INTO settings VALUES ('price_per_kwh', ?)", (str(price),))
 
     def add_sample(self, ip: str, ts: float, watts: float) -> None:
+        weekend, slot = slot_key(ts)
         with self._db:
             self._db.execute("INSERT INTO power_samples VALUES (?, ?, ?)", (ip, ts, watts))
+            self._db.execute(
+                "INSERT INTO power_profile VALUES (?, ?, ?, ?, 1) "
+                "ON CONFLICT (ip, weekend, slot) DO UPDATE SET total = total + excluded.total, n = n + 1",
+                (ip, weekend, slot, watts),
+            )
+
+    def profile(self, ip: str) -> dict[tuple[int, int], tuple[float, int]]:
+        rows = self._db.execute("SELECT weekend, slot, total / n, n FROM power_profile WHERE ip = ?", (ip,))
+        return {(w, s): (mean, n) for w, s, mean, n in rows}
+
+    def _seed_profile(self) -> None:
+        """Readings saved before the profile existed still teach it, once."""
+        if self._db.execute("SELECT 1 FROM power_profile LIMIT 1").fetchone():
+            return
+        for ip, ts, watts in self._db.execute("SELECT ip, ts, watts FROM power_samples ORDER BY ts").fetchall():
+            weekend, slot = slot_key(ts)
+            self._db.execute(
+                "INSERT INTO power_profile VALUES (?, ?, ?, ?, 1) "
+                "ON CONFLICT (ip, weekend, slot) DO UPDATE SET total = total + excluded.total, n = n + 1",
+                (ip, weekend, slot, watts),
+            )
+        self._db.commit()
 
     def recent_samples(self, ip: str, since: float) -> list[tuple[float, float]]:
         rows = self._db.execute("SELECT ts, watts FROM power_samples WHERE ip = ? AND ts >= ? ORDER BY ts", (ip, since))
