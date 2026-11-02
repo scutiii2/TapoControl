@@ -46,7 +46,9 @@ def test_short_gap_gets_a_midpoint():
 def test_total_series_sums_plugs_and_carries_a_reading_over_a_bucket_edge():
     from core.profile import total_series
 
-    a = [(0.0, 10.0), (5.0, 10.0), (10.0, 10.0)]
-    b = [(0.2, 5.0), (5.6, 5.0), (10.0, 5.0)]  # b's second reading lands in the next bucket
-    assert [w for _, w in total_series([a, b], 5)] == [15.0, 15.0, 15.0]
-    assert total_series([[(0.0, 4.0)], [(0.0, 6.0), (100.0, 6.0)]], 5) == [(0.0, 10.0), (100.0, 6.0)]
+    a = [(4.9, 10.0), (10.2, 10.0)]
+    b = [(5.1, 5.0), (10.2, 5.0)]  # b's first reading lands one bucket after a's
+    assert [w for _, w in total_series([a, b], 5)] == [10.0, 15.0, 15.0]
+    assert total_series([[(0.0, 4.0)], [(0.0, 6.0), (100.0, 6.0)]], 5) == [(2.5, 10.0), (102.5, 6.0)]
+    adjacent = [(150.0, 1.0), (450.0, 1.0)]  # centres of neighbouring 300 s buckets must stay apart
+    assert len(total_series([adjacent], 300)) == 2

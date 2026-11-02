@@ -32,7 +32,7 @@ def total_series(
     for points in series:
         buckets: dict[int, list[float]] = {}
         for t, w in points:
-            buckets.setdefault(round(t / interval), []).append(w)
+            buckets.setdefault(int(t // interval), []).append(w)
         means.append({k: sum(v) / len(v) for k, v in buckets.items()})
     last: list[tuple[int, float] | None] = [None] * len(means)
     totals: list[tuple[float, float]] = []
@@ -43,7 +43,7 @@ def total_series(
                 last[n] = (key, m[key])
             if last[n] and key - last[n][0] <= hold:
                 total += last[n][1]
-        totals.append((key * interval, total))
+        totals.append((key * interval + interval / 2, total))
     return totals
 
 
