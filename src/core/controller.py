@@ -60,13 +60,16 @@ class TapoController:
     async def _call(self, ip: str, fn):
         """Run `fn(plug)` on a cached handler; drop the handler on error so the next call logs in again."""
         async with self._locks.setdefault(ip, asyncio.Lock()):
-            try:
-                if ip not in self._plugs:
-                    self._plugs[ip] = await self._client.p110(ip)
-                return await fn(self._plugs[ip])
-            except Exception:
-                self._plugs.pop(ip, None)
-                raise
+            for attempt in (1, 2):
+                try:
+                    if ip not in self._plugs:
+                        self._plugs[ip] = await self._client.p110(ip)
+                    return await fn(self._plugs[ip])
+                except Exception as e:
+                    self._plugs.pop(ip, None)
+                    # An expired session is routine: log in once more, but never retry other errors (lockout risk).
+                    if attempt == 2 or "SESSION_INVALID" not in str(e):
+                        raise
 
     async def _find_ips(self, timeout: int) -> list[str]:
         """Broadcast discovery needs no credentials; python-kasa only finds IPs, tapo does the control."""

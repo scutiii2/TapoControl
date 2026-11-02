@@ -104,3 +104,12 @@ def test_logs_in_once_per_plug_and_again_after_error():
 
     asyncio.run(run())
     assert client.logins == 2
+
+
+def test_expired_session_relogs_in_once():
+    plug = FakePlug(fail='Tapo(DeviceError { code: -2402, kind: "TPAP_SESSION_INVALID" })')
+    client = FakeClient(plug)
+    c = TapoController("e", "p", client=client)
+    with pytest.raises(Exception, match="SESSION_INVALID"):
+        asyncio.run(c.snapshot("1.1.1.1"))
+    assert client.logins == 2  # one retry, then give up
