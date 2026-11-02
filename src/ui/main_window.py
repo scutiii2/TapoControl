@@ -7,6 +7,7 @@ from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -24,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.async_runner import AsyncRunner
-from core.controller import AuthError, TapoController
+from core.controller import AuthError, TapoController, merge_power
 from core.store import DeviceInfo, Store
 from ui.charts import LiveChart
 from ui.history_dialog import HistoryPanel
@@ -36,6 +37,8 @@ REFRESH_MS = 5000
 SAMPLES = 120  # 10 minutes of watts at REFRESH_MS
 OFFLINE_RESCAN_AFTER = 3  # consecutive failed refreshes before looking for a new IP
 RESCAN_COOLDOWN_S = 60
+WINDOWS = (("Last 10 minutes", 0), ("Last hour", 1), ("Last 24 hours", 24))  # label, hours of plug history
+LONG_REFRESH_S = 60
 
 
 class MainWindow(QMainWindow):
@@ -52,6 +55,8 @@ class MainWindow(QMainWindow):
         self._inflight: set[str] = set()
         self._samples: dict[str, deque[float]] = {}
         self._times: dict[str, deque[float]] = {}
+        self._long: dict[str, list[tuple[float, float]]] = {}  # plug-stored 5-minute averages
+        self._long_fetched: dict[str, tuple[int, float]] = {}  # ip -> (hours, monotonic time)
         self._failures: dict[str, int] = {}
         self._last_rescan = 0.0
         self._auth_required = False
@@ -67,6 +72,11 @@ class MainWindow(QMainWindow):
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._list.setAccessibleName("Smart plugs")
         self._chart = LiveChart(SAMPLES)
+        self._window = QComboBox()
+        self._window.setAccessibleName("Chart range")
+        for label, hours in WINDOWS:
+            self._window.addItem(label, hours)
+        self._window.currentIndexChanged.connect(self._window_changed)
         self._list.currentItemChanged.connect(self._selection_changed)
         self._scan = QPushButton("Scan network")
         self._scan.setProperty("primary", True)
@@ -121,7 +131,16 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.setChildrenCollapsible(False)
         splitter.addWidget(plugs)
-        splitter.addWidget(self._chart)
+        chart_box = QWidget()
+        chart_layout = QVBoxLayout(chart_box)
+        chart_layout.setContentsMargins(0, 0, 0, 0)
+        chart_layout.setSpacing(6)
+        chart_head = QHBoxLayout()
+        chart_head.addStretch(1)
+        chart_head.addWidget(self._window)
+        chart_layout.addLayout(chart_head)
+        chart_layout.addWidget(self._chart, 1)
+        splitter.addWidget(chart_box)
         splitter.setSizes([360, 260])
         devices_layout.addWidget(splitter, 1)
         self._history = HistoryPanel(self, store, runner)
@@ -273,6 +292,7 @@ class MainWindow(QMainWindow):
         for ip in self._devices:
             if ip not in self._inflight:
                 self._refresh_ip(ip)
+        self._fetch_long()
 
     def _refresh_ip(self, ip: str) -> None:
         if not self._controller or self._auth_required or ip not in self._devices:
@@ -364,6 +384,7 @@ class MainWindow(QMainWindow):
 
     def _selection_changed(self, *_args) -> None:
         self._render_cards()
+        self._fetch_long()
         self._render_chart()
 
     def _on_scanned(self, devices: list[DeviceInfo] | None, error: BaseException | None) -> None:
@@ -474,11 +495,42 @@ class MainWindow(QMainWindow):
                 self._samples.get(ip, ()),
             )
 
+    def _window_changed(self) -> None:
+        self._fetch_long()
+        self._render_chart()
+
+    def _fetch_long(self) -> None:
+        """Pull the plug's own 5-minute history for the selected plug when a long window is chosen."""
+        ip, hours = self._selected_ip(), self._window.currentData()
+        if not hours or ip is None or not self._controller or self._auth_required:
+            return
+        last = self._long_fetched.get(ip)
+        if last and last[0] == hours and time.monotonic() - last[1] < LONG_REFRESH_S:
+            return
+        self._long_fetched[ip] = (hours, time.monotonic())
+
+        def done(result, error):
+            if not error:  # unsupported or failing history leaves the chart on our own readings
+                self._long[ip] = result or []
+                self._render_chart()
+
+        self._submit(self._controller.power_history(ip, hours), done)
+
     def _render_chart(self) -> None:
         ip = self._selected_ip()
         samples = self._samples.get(ip)
-        if ip in self._devices and samples:
-            title = f"{self._devices[ip].alias} · now {samples[-1]:.1f} W · peak {max(samples):.1f} W"
+        hours = self._window.currentData()
+        name = self._devices[ip].alias if ip in self._devices else None
+        if hours and name:
+            span = hours * 3600
+            own = self._store.recent_samples(ip, time.time() - span)
+            points = merge_power(self._long.get(ip, []), own)
+            peak = max((w for _, w in points), default=0)
+            title = f"{name} · average watts · peak {peak:.1f} W" if points else f"{name} - average watts"
+            self._chart.show_samples([w for _, w in points], title, [t for t, _ in points], span=span, interval=300)
+            return
+        if name and samples:
+            title = f"{name} · now {samples[-1]:.1f} W · peak {max(samples):.1f} W"
         else:
-            title = f"{self._devices[ip].alias} - live watts" if ip in self._devices else "Select a plug"
+            title = f"{name} - live watts" if name else "Select a plug"
         self._chart.show_samples(samples, title, self._times.get(ip))

@@ -4,7 +4,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from core.controller import AuthError, TapoController, monthly_totals, previous_quarter, quarter_start, trim_leading_zeros
+from core.controller import AuthError, TapoController, merge_power, monthly_totals, previous_quarter, quarter_start, trim_leading_zeros
 
 
 class FakePlug:
@@ -36,6 +36,9 @@ class FakePlug:
 
     async def get_energy_data(self, interval, start_date, end_date=None):
         return NS(entries=[100, 200], start_date_time=start_date)
+
+    async def get_power_data(self, interval, start, end):
+        return NS(entries=[10, 20], interval_length=5, start_date_time=datetime(2026, 11, 2, 12, 0))
 
     async def get_device_usage(self):
         return NS(power_usage=NS(today=1, past7=700, past30=3000), time_usage=NS(today=2, past7=300, past30=1200))
@@ -169,3 +172,13 @@ def test_daily_request_passes_end_date():
 
     asyncio.run(controller(Plug()).daily_history("1.1.1.1"))
     assert seen == [(quarter_start(date.today()), date.today())]
+
+
+def test_power_history_timestamps_and_merge():
+    rows = asyncio.run(controller().power_history("1.1.1.1", 1))
+    first = datetime(2026, 11, 2, 12, 0).timestamp()
+    assert rows == [(first, 10.0), (first + 300, 20.0)]
+    # own readings fill buckets the plug has no value for; the plug wins where both exist
+    own = [(first + 300 + 5, 99.0), (first + 600 + 5, 40.0), (first + 600 + 10, 60.0)]
+    merged = merge_power(rows, own)
+    assert [w for _, w in merged] == [10.0, 20.0, 50.0]

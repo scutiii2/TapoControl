@@ -12,7 +12,11 @@ from PySide6.QtWidgets import QToolTip
 from ui.theme import theme
 
 SAMPLE_SECONDS = 5  # must match the main window's refresh interval
-GAP_SLOTS = 2.5  # further apart than this and the line breaks
+GAP_SLOTS = 2.5  # further apart than this many sample intervals and the line breaks
+
+
+def ago_label(seconds: float) -> str:
+    return f"{seconds / 3600:g} h ago" if seconds >= 3600 else f"{seconds / 60:g} min ago"
 BOTTOM = Qt.AlignmentFlag.AlignBottom
 LEFT = Qt.AlignmentFlag.AlignLeft
 
@@ -53,6 +57,8 @@ class LiveChart(QChartView):
         self._points: list[tuple[float, float]] = []  # (slot, watts); slot == max_samples is "now"
         self._lines: list[QLineSeries] = []
         self._hover: int | None = None
+        self._span = max_samples * SAMPLE_SECONDS
+        self._gap_slots = GAP_SLOTS
         self.setMouseTracking(True)
         self._y = QValueAxis()
         self._y.setTitleText("W")
@@ -68,14 +74,22 @@ class LiveChart(QChartView):
         for line in self._lines:
             line.setPen(QPen(QColor(theme().colors.accent), 2.5))
 
-    def show_samples(self, samples: deque[float] | None, title: str, times: Sequence[float] | None = None) -> None:
-        """`times` are epoch seconds per sample; with them, gaps (app closed) show as gaps."""
+    def show_samples(
+        self, samples: deque[float] | None, title: str, times: Sequence[float] | None = None,
+        span: float | None = None, interval: float = SAMPLE_SECONDS,
+    ) -> None:
+        """`times` are epoch seconds per sample; with them, gaps (app closed) show as gaps.
+
+        `span` is the window in seconds (default: the live window); `interval` the normal spacing of samples.
+        """
+        self._span = span or self._max * SAMPLE_SECONDS
+        self._gap_slots = GAP_SLOTS * interval / self._span * self._max
         samples = list(samples or ())
         self._hover = None
         self.chart().setTitle(title)
         if times is not None and len(times) == len(samples):
             now = time.time()
-            points = [(self._max - (now - t) / SAMPLE_SECONDS, w) for t, w in zip(times, samples)]
+            points = [(self._max - (now - t) / self._span * self._max, w) for t, w in zip(times, samples)]
             points = [p for p in points if p[0] >= 0]
         else:
             offset = self._max - len(samples)
@@ -86,7 +100,7 @@ class LiveChart(QChartView):
         self._lines = []
         segment: list[tuple[float, float]] = []
         for point in points + [None]:
-            if point is not None and (not segment or point[0] - segment[-1][0] <= GAP_SLOTS):
+            if point is not None and (not segment or point[0] - segment[-1][0] <= self._gap_slots):
                 segment.append(point)
                 continue
             if segment:
@@ -110,7 +124,7 @@ class LiveChart(QChartView):
             return None
         slot = (x - area.left()) / area.width() * self._max
         index = min(range(len(self._points)), key=lambda i: abs(self._points[i][0] - slot))
-        return index if abs(self._points[index][0] - slot) <= GAP_SLOTS else None
+        return index if abs(self._points[index][0] - slot) <= self._gap_slots else None
 
     def mouseMoveEvent(self, event) -> None:
         super().mouseMoveEvent(event)
@@ -129,7 +143,7 @@ class LiveChart(QChartView):
         painter.save()
         painter.setPen(QColor(c.muted))
         painter.setFont(QFont("Segoe UI", 9))
-        for slot, label, align in ((0, "10 min ago", Qt.AlignmentFlag.AlignLeft), (self._max // 2, "5 min ago", Qt.AlignmentFlag.AlignHCenter), (self._max, "now", Qt.AlignmentFlag.AlignRight)):
+        for slot, label, align in ((0, ago_label(self._span), Qt.AlignmentFlag.AlignLeft), (self._max // 2, ago_label(self._span / 2), Qt.AlignmentFlag.AlignHCenter), (self._max, "now", Qt.AlignmentFlag.AlignRight)):
             x = area.left() + slot / self._max * area.width()
             box = QRectF(x - 40, area.bottom() + 6, 80, 18)
             if align == Qt.AlignmentFlag.AlignLeft:
@@ -146,8 +160,8 @@ class LiveChart(QChartView):
             painter.setPen(QPen(QColor(c.surface), 2))
             painter.setBrush(QColor(c.accent))
             painter.drawEllipse(QPointF(x, y), 4.5, 4.5)
-            ago = round((self._max - slot) * SAMPLE_SECONDS)
-            text = f"{value:.1f} W · " + ("now" if ago <= SAMPLE_SECONDS else f"{ago} s ago" if ago < 60 else f"{ago // 60} min {ago % 60:02d} s ago")
+            ago = round((self._max - slot) / self._max * self._span)
+            text = f"{value:.1f} W · " + ("now" if ago <= SAMPLE_SECONDS else f"{ago} s ago" if ago < 60 else f"{ago // 3600} h {ago % 3600 // 60:02d} min ago" if ago >= 3600 else f"{ago // 60} min {ago % 60:02d} s ago")
             box = QRectF(0, 0, painter.fontMetrics().horizontalAdvance(text) + 16, 24)
             box.moveTopLeft(QPointF(min(x + 10, area.right() - box.width()), max(area.top(), y - 34)))
             painter.setPen(QPen(QColor(c.border), 1))

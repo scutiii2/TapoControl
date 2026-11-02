@@ -1,5 +1,6 @@
 """UI flow checks with in-memory storage and fake controller coroutines only."""
 import asyncio
+import time
 import os
 from datetime import date
 from pathlib import Path
@@ -40,6 +41,10 @@ class FakeController:
     async def usage(self, ip):
         self.calls.append(("usage", ip))
         return UsageSummary(700, 3000, 300, 1200)
+
+    async def power_history(self, ip, hours):
+        self.calls.append(("power", ip, hours))
+        return [(time.time() - 1200, 30.0), (time.time() - 900, 40.0)]
 
     async def hourly_today(self, ip):
         self.calls.append(("hourly", ip))
@@ -313,3 +318,18 @@ def test_live_chart_breaks_line_over_gap_and_keeps_restored_samples():
     assert len(chart._lines) == 2  # app was closed between the second and third reading
     chart.show_samples([5.0], "x", [now - 900])  # older than the 10 minute window
     assert chart._lines == [] and chart._points == []
+
+
+def test_long_chart_window_fetches_plug_history_and_ignores_failure(window):
+    w, runner, controller = window
+    w._window.setCurrentIndex(1)  # last hour
+    runner.finish()
+    assert ("power", w._selected_ip(), 1) in controller.calls
+    assert len(w._chart._points) == 2
+    assert "average watts" in w._chart.chart().title()
+    ip = w._selected_ip()
+    before = list(w._long[ip])
+    w._long_fetched.clear()
+    w._fetch_long()
+    runner.pending[-1][1](None, RuntimeError("unsupported"))  # failure keeps what the chart already had
+    assert w._long[ip] == before and len(w._chart._points) == 2

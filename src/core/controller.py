@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 
 from kasa import Discover
 from tapo import ApiClient
-from tapo.requests import EnergyDataInterval
+from tapo.requests import EnergyDataInterval, PowerDataInterval
 
 from core.store import DeviceInfo
 
@@ -62,6 +62,21 @@ def monthly_totals(rows: list[tuple[date, int]]) -> list[tuple[date, int]]:
         key = day.replace(day=1)
         totals[key] = totals.get(key, 0) + wh
     return sorted(totals.items())
+
+
+def merge_power(
+    plug: list[tuple[float, float]], own: list[tuple[float, float]], bucket: int = 300
+) -> list[tuple[float, float]]:
+    """Combine the plug's 5-minute averages with our own readings, averaged into the same buckets.
+
+    The plug's value wins where both exist, so the chart has no gaps while the app was closed.
+    """
+    own_sums: dict[int, list[float]] = {}
+    for ts, watts in own:
+        own_sums.setdefault(int(ts // bucket), []).append(watts)
+    merged = {b: (sum(w) / len(w)) for b, w in own_sums.items()}
+    merged.update({int(ts // bucket): watts for ts, watts in plug})
+    return [(b * bucket + bucket / 2, watts) for b, watts in sorted(merged.items())]
 
 
 def is_p110(model: str | None) -> bool:
@@ -194,3 +209,13 @@ class TapoController:
                 break
             rows = older + rows
         return trim_leading_zeros(rows)
+
+    @_mapped
+    async def power_history(self, ip: str, hours: int) -> list[tuple[float, float]]:
+        """(epoch seconds, average watts) in 5-minute steps over the last `hours`, as the plug stored them."""
+        end = datetime.now()
+        start = end - timedelta(hours=hours)
+        data = await self._call(ip, lambda plug: plug.get_power_data(PowerDataInterval.Every5Minutes, start, end))
+        step = (data.interval_length or 5) * 60
+        first = data.start_date_time.timestamp()
+        return [(first + i * step, float(w)) for i, w in enumerate(data.entries)]
