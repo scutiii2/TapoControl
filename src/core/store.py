@@ -1,0 +1,75 @@
+"""Local persistence: SQLite for the account email and known plugs, Windows Credential Manager for the password."""
+import os
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
+
+import keyring
+
+SERVICE = "TapoControl"
+
+
+@dataclass(frozen=True)
+class DeviceInfo:
+    ip: str
+    alias: str
+    model: str
+
+
+def default_db_path() -> Path:
+    return Path(os.environ.get("APPDATA", Path.home())) / "TapoControl" / "tapo.db"
+
+
+class Store:
+    def __init__(self, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._db = sqlite3.connect(path)
+        self._db.executescript(
+            "CREATE TABLE IF NOT EXISTS account (id INTEGER PRIMARY KEY CHECK (id = 1), email TEXT NOT NULL);"
+            "CREATE TABLE IF NOT EXISTS devices (ip TEXT PRIMARY KEY, alias TEXT NOT NULL, model TEXT NOT NULL);"
+            # Separate table so a rescan (which rewrites devices) keeps the user's names.
+            "CREATE TABLE IF NOT EXISTS nicknames (ip TEXT PRIMARY KEY, nickname TEXT NOT NULL);"
+            "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+        )
+
+    def save_account(self, email: str, password: str) -> None:
+        with self._db:
+            self._db.execute("INSERT OR REPLACE INTO account (id, email) VALUES (1, ?)", (email,))
+        keyring.set_password(SERVICE, email, password)
+
+    def account(self) -> tuple[str, str] | None:
+        row = self._db.execute("SELECT email FROM account WHERE id = 1").fetchone()
+        email = row[0] if row else None
+        password = keyring.get_password(SERVICE, email) if email else None
+        return (email, password) if password else None
+
+    def save_devices(self, devices: list[DeviceInfo]) -> None:
+        with self._db:
+            self._db.execute("DELETE FROM devices")
+            self._db.executemany("INSERT INTO devices VALUES (?, ?, ?)", [(d.ip, d.alias, d.model) for d in devices])
+
+    def devices(self) -> list[DeviceInfo]:
+        rows = self._db.execute(
+            "SELECT d.ip, COALESCE(n.nickname, d.alias) AS name, d.model FROM devices d "
+            "LEFT JOIN nicknames n ON n.ip = d.ip ORDER BY name"
+        )
+        return [DeviceInfo(*r) for r in rows]
+
+    def set_nickname(self, ip: str, nickname: str) -> None:
+        """Empty nickname clears it, falling back to the name set in the Tapo app."""
+        with self._db:
+            if nickname.strip():
+                self._db.execute("INSERT OR REPLACE INTO nicknames VALUES (?, ?)", (ip, nickname.strip()))
+            else:
+                self._db.execute("DELETE FROM nicknames WHERE ip = ?", (ip,))
+
+    def price_per_kwh(self) -> float:
+        row = self._db.execute("SELECT value FROM settings WHERE key = 'price_per_kwh'").fetchone()
+        return float(row[0]) if row else 0.0
+
+    def set_price_per_kwh(self, price: float) -> None:
+        with self._db:
+            self._db.execute("INSERT OR REPLACE INTO settings VALUES ('price_per_kwh', ?)", (str(price),))
+
+    def close(self) -> None:
+        self._db.close()
