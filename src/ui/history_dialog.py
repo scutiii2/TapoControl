@@ -8,7 +8,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -22,6 +21,7 @@ from core.controller import AuthError, EnergySummary, TapoController, UsageSumma
 from core.store import Store
 from ui.charts import OVERALL, LineColors, LineToggles, UsageChart, UsageLine
 from ui.theme import energy_error, theme
+from ui.widgets import metric_card
 
 
 RANGES = ("Today by hour", "This quarter", "Last 12 months", "All time")
@@ -82,9 +82,9 @@ class HistoryPanel(QWidget):
         self._export.clicked.connect(self._export_csv)
         header.addWidget(self._export)
         totals = QHBoxLayout()
-        self._today, self._today_cost = self._total_card(totals, "TODAY")
-        self._month, self._month_cost = self._total_card(totals, "THIS MONTH")
-        self._runtime, self._runtime_month = self._total_card(totals, "ON TODAY")
+        self._today, self._today_cost = metric_card(totals, "TODAY", "Estimated cost —")
+        self._month, self._month_cost = metric_card(totals, "THIS MONTH", "Estimated cost —")
+        self._runtime, self._runtime_month = metric_card(totals, "ON TODAY", "This month —")
         self._usage = QLabel()
         self._usage.setProperty("tone", "muted")
         self._usage.setWordWrap(True)
@@ -112,22 +112,6 @@ class HistoryPanel(QWidget):
         note.setWordWrap(True)
         layout.addWidget(note)
         self.clear()
-
-    def _total_card(self, row: QHBoxLayout, title: str) -> tuple[QLabel, QLabel]:
-        card = QFrame()
-        card.setProperty("card", True)
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(20, 16, 20, 16)
-        heading = QLabel(title)
-        heading.setProperty("tone", "muted")
-        value = QLabel("—")
-        value.setProperty("role", "metric")
-        cost = QLabel("Estimated cost —")
-        cost.setProperty("tone", "muted")
-        for label in (heading, value, cost):
-            layout.addWidget(label)
-        row.addWidget(card, 1)
-        return value, cost
 
     def _error_label(self) -> QLabel:
         label = QLabel()

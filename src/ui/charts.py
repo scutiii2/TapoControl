@@ -1,4 +1,4 @@
-"""Chart widgets: rolling live watts and daily kWh bars."""
+"""Chart widgets: rolling live watts and usage per day, month or hour, built on one shared base."""
 import time
 from collections import deque
 from collections.abc import Sequence
@@ -153,6 +153,115 @@ def paint_readout(
         painter.drawText(QRectF(box.left() + 24, top, width - 30, 18), middle, text)
 
 
+MARKER_LIMIT = 40  # a line with more points than this draws no point markers
+
+
+class BaseChart(QChartView):
+    """The look every chart shares: size, margins, axes, line pens, label row and hover readout.
+
+    A subclass fills the chart with `_add_series`, and supplies `_label_row`, `_hover_at` and `_readout`.
+    """
+
+    def __init__(self, unit: str):
+        super().__init__(QChart())
+        self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        chart = self.chart()
+        chart.legend().hide()
+        chart.setMargins(QMargins(8, 4, 16, 30))
+        self.setMinimumHeight(220)
+        self.setMouseTracking(True)
+        self._x = QValueAxis()
+        self._x.setLabelsVisible(False)
+        self._x.setGridLineVisible(False)
+        self._y = QValueAxis()
+        self._y.setTitleText(unit)
+        self._y.setTickCount(4)
+        chart.addAxis(self._x, BOTTOM)
+        chart.addAxis(self._y, LEFT)
+        self._drawn: list[tuple[QLineSeries, str | None, bool]] = []  # series, color (None: accent), dashed
+        self._hover = None
+        theme().changed.connect(self._apply_theme)
+
+    def _apply_theme(self) -> None:
+        style_chart(self)
+        colors = theme().colors
+        for series, color, dashed in self._drawn:
+            if dashed:
+                series.setPen(QPen(QColor(color or colors.control), 1.5, Qt.PenStyle.DashLine))
+            else:
+                series.setPen(QPen(QColor(color or colors.accent), 2.5 if color is None else 2))
+        self.viewport().update()
+
+    def _clear_series(self) -> None:
+        for series, _, _ in self._drawn:
+            self.chart().removeSeries(series)
+        self._drawn = []
+
+    def _add_series(
+        self, points: Sequence[tuple[float, float]], color: str | None, dashed: bool = False,
+    ) -> QLineSeries:
+        series = QLineSeries()
+        series.append([QPointF(x, y) for x, y in points])
+        series.setPointsVisible(not dashed and len(points) <= MARKER_LIMIT)
+        self.chart().addSeries(series)
+        series.attachAxis(self._x)
+        series.attachAxis(self._y)
+        self._drawn.append((series, color, dashed))
+        return series
+
+    def _fit_y(self, peak: float, minimum: float, decimals: int) -> None:
+        self._y.setRange(0, max(minimum, peak * 1.2))
+        self._y.applyNiceNumbers()
+        self._y.setLabelFormat(f"%.{decimals}f")
+
+    def _plot_area(self) -> QRectF:
+        return self.chart().mapRectToScene(self.chart().plotArea())
+
+    def _label_row(self) -> Sequence[tuple[float, str]]:
+        """(fraction of the plot width, text) labels under the plot."""
+        return ()
+
+    def _hover_at(self, x: float):
+        """What is under the cursor at scene x (None for nothing)."""
+        return None
+
+    def _readout(self, area: QRectF):
+        """(x, heading, dots, entries) for `paint_readout`, or None."""
+        return None
+
+    def mouseMoveEvent(self, event) -> None:
+        super().mouseMoveEvent(event)
+        self._hover = self._hover_at(self.mapToScene(event.position().toPoint()).x())
+        self.viewport().update()
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        self._hover = None
+        self.viewport().update()
+
+    def drawForeground(self, painter: QPainter, rect: QRectF) -> None:
+        super().drawForeground(painter, rect)
+        area = self._plot_area()
+        painter.save()
+        painter.setPen(QColor(theme().colors.muted))
+        painter.setFont(QFont("Segoe UI", 9))
+        for fraction, text in self._label_row():
+            x = area.left() + fraction * area.width()
+            box = QRectF(x - 40, area.bottom() + 8, 80, 18)
+            align = Qt.AlignmentFlag.AlignHCenter
+            if box.left() < area.left():
+                box.moveLeft(area.left())
+                align = Qt.AlignmentFlag.AlignLeft
+            elif box.right() > area.right():
+                box.moveRight(area.right())
+                align = Qt.AlignmentFlag.AlignRight
+            painter.drawText(box, align | Qt.AlignmentFlag.AlignVCenter, text)
+        readout = self._readout(area) if self._hover is not None else None
+        if readout:
+            paint_readout(painter, area, *readout)
+        painter.restore()
+
+
 @dataclass
 class Line:
     """One series of the live chart: `times` are epoch seconds. `color` None means the theme accent."""
@@ -164,48 +273,22 @@ class Line:
     estimates: Sequence[tuple[float, float]] = ()
 
 
-class LiveChart(QChartView):
+class LiveChart(BaseChart):
     """Watt lines (one per plug, plus the overall) over the last `max_samples` x SAMPLE_SECONDS."""
 
     def __init__(self, max_samples: int):
-        super().__init__(QChart())
-        self.setRenderHint(QPainter.RenderHint.Antialiasing)
-        chart = self.chart()
-        chart.legend().hide()
-        chart.setMargins(QMargins(8, 4, 16, 26))
-        self.setMinimumHeight(200)
-        self._x = QValueAxis()
+        super().__init__("W")
         self._x.setRange(0, max_samples)
-        self._x.setLabelsVisible(False)
-        self._x.setGridLineVisible(False)
         self._max = max_samples
         self._names: list[str] = []
         self._colors: list[str | None] = []
         self._points: list[list[tuple[float, float]]] = []  # per line: (slot, watts); slot == max_samples is "now"
         self._lines: list[QLineSeries] = []
-        self._line_colors: list[str | None] = []
         self._bridges: list[QLineSeries] = []
-        self._bridge_colors: list[str | None] = []
-        self._hover: float | None = None  # slot under the cursor
         self._span = max_samples * SAMPLE_SECONDS
         self._gap_slots = GAP_SLOTS
-        self.setMouseTracking(True)
-        self._y = QValueAxis()
-        self._y.setTitleText("W")
-        chart.addAxis(self._x, BOTTOM)
-        chart.addAxis(self._y, LEFT)
-        self._y.setTickCount(4)
         self._y.setLabelFormat("%.0f")
-        theme().changed.connect(self._apply_theme)
         self._apply_theme()
-
-    def _apply_theme(self) -> None:
-        style_chart(self)
-        colors = theme().colors
-        for line, color in zip(self._lines, self._line_colors, strict=True):
-            line.setPen(QPen(QColor(color or colors.accent), 2.5 if color is None else 2))
-        for line, color in zip(self._bridges, self._bridge_colors, strict=True):
-            line.setPen(QPen(QColor(color or colors.control), 1.5, Qt.PenStyle.DashLine))
 
     def show_samples(
         self, samples: deque[float] | None, title: str, times: Sequence[float] | None = None,
@@ -231,9 +314,8 @@ class LiveChart(QChartView):
         self._gap_slots = GAP_SLOTS * interval / self._span * self._max
         self._hover = None
         self.chart().setTitle(title)
-        for series in self._lines + self._bridges:
-            self.chart().removeSeries(series)
-        self._lines, self._bridges, self._line_colors, self._bridge_colors = [], [], [], []
+        self._clear_series()
+        self._lines, self._bridges = [], []
         self._names, self._colors, self._points = [line.name for line in lines], [line.color for line in lines], []
         for line in lines:
             points = [(self._slot(t), w) for t, w in zip(line.times, line.watts, strict=True)]
@@ -251,32 +333,21 @@ class LiveChart(QChartView):
                     inside = sorted(
                         (x, w) for x, w in ((self._slot(t), w) for t, w in line.estimates) if before[0] < x < after[0]
                     )
-                    self._add_line([before, *inside, after], self._bridges, self._bridge_colors, line.color)
-                self._add_line(segment, self._lines, self._line_colors, line.color)
+                    self._bridges.append(self._add_series([before, *inside, after], line.color, dashed=True))
+                self._lines.append(self._add_series(segment, line.color))
         peak = max((w for points in self._points for _, w in points), default=0)
-        self._y.setRange(0, max(10.0, peak * 1.2))
-        self._y.applyNiceNumbers()
-        self._y.setLabelFormat("%.1f" if peak < 10 else "%.0f")
+        self._fit_y(peak, 10.0, 1 if peak < 10 else 0)
         self._apply_theme()
-        self.viewport().update()
 
     def _slot(self, ts: float) -> float:
         return self._max - (time.time() - ts) / self._span * self._max
 
-    def _add_line(
-        self, points: list[tuple[float, float]], into: list[QLineSeries], colors: list[str | None], color: str | None,
-    ) -> None:
-        line = QLineSeries()
-        line.append([QPointF(x, w) for x, w in points])
-        self.chart().addSeries(line)
-        line.attachAxis(self._x)
-        line.attachAxis(self._y)
-        into.append(line)
-        colors.append(color)
+    def _label_row(self) -> Sequence[tuple[float, str]]:
+        return ((0, ago_label(self._span)), (0.5, ago_label(self._span / 2)), (1, "now"))
 
-    def _slot_at(self, x: float) -> float | None:
+    def _hover_at(self, x: float) -> float | None:
         """Slot of the reading nearest the cursor, over all lines."""
-        area = self.chart().mapRectToScene(self.chart().plotArea())
+        area = self._plot_area()
         slots = [s for points in self._points for s, _ in points]
         if not slots or not area.left() <= x <= area.right():
             return None
@@ -294,48 +365,17 @@ class LiveChart(QChartView):
                     rows.append((i, *near))
         return rows
 
-    def mouseMoveEvent(self, event) -> None:
-        super().mouseMoveEvent(event)
-        self._hover = self._slot_at(self.mapToScene(event.position().toPoint()).x())
-        self.viewport().update()
-
-    def leaveEvent(self, event) -> None:
-        super().leaveEvent(event)
-        self._hover = None
-        self.viewport().update()
-
-    def drawForeground(self, painter: QPainter, rect: QRectF) -> None:
-        super().drawForeground(painter, rect)
-        c = theme().colors
-        area = self.chart().mapRectToScene(self.chart().plotArea())
-        painter.save()
-        painter.setPen(QColor(c.muted))
-        painter.setFont(QFont("Segoe UI", 9))
-        left, center, right = (Qt.AlignmentFlag.AlignLeft, Qt.AlignmentFlag.AlignHCenter, Qt.AlignmentFlag.AlignRight)
-        labels = (
-            (0, ago_label(self._span), left),
-            (self._max // 2, ago_label(self._span / 2), center),
-            (self._max, "now", right),
-        )
-        for slot, label, align in labels:
-            x = area.left() + slot / self._max * area.width()
-            box = QRectF(x - 40, area.bottom() + 6, 80, 18)
-            if align == Qt.AlignmentFlag.AlignLeft:
-                box.moveLeft(x)
-            elif align == Qt.AlignmentFlag.AlignRight:
-                box.moveRight(x)
-            painter.drawText(box, align | Qt.AlignmentFlag.AlignVCenter, label)
-        rows = self._rows_at(self._hover) if self._hover is not None else []
-        if rows:
-            x = area.left() + self._hover / self._max * area.width()
-            dots = []
-            for i, slot, value in rows:
-                y = area.bottom() - value / (self._y.max() or 1) * area.height()
-                dots.append((QPointF(area.left() + slot / self._max * area.width(), y), self._color_of(i)))
-            entries = [(self._color_of(i), f"{self._names[i]}  {value:.1f} W".strip()) for i, _, value in rows]
-            ago = round((self._max - self._hover) / self._max * self._span)
-            paint_readout(painter, area, x, age_text(ago), dots, entries)
-        painter.restore()
+    def _readout(self, area: QRectF):
+        rows = self._rows_at(self._hover)
+        if not rows:
+            return None
+        dots = []
+        for i, slot, value in rows:
+            y = area.bottom() - value / (self._y.max() or 1) * area.height()
+            dots.append((QPointF(area.left() + slot / self._max * area.width(), y), self._color_of(i)))
+        entries = [(self._color_of(i), f"{self._names[i]}  {value:.1f} W".strip()) for i, _, value in rows]
+        ago = round((self._max - self._hover) / self._max * self._span)
+        return area.left() + self._hover / self._max * area.width(), age_text(ago), dots, entries
 
     def _color_of(self, index: int) -> str:
         """The line's own color; the overall (no color) wears the accent."""
@@ -351,32 +391,17 @@ class UsageLine:
     wh: Sequence[int | None]
 
 
-class UsageChart(QChartView):
+class UsageChart(BaseChart):
     """kWh per day, month or hour: one line per plug plus the overall."""
 
     TITLES = {"day": "Daily usage", "month": "Monthly usage", "hour": "Usage today by hour"}
 
     def __init__(self):
-        super().__init__(QChart())
-        self.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.chart().legend().hide()
-        self.chart().setMargins(QMargins(8, 4, 16, 30))
-        self.setMinimumHeight(250)
-        self.setMouseTracking(True)
+        super().__init__("kWh")
         self._keys: list = []  # a date, or an hour number for the hourly view
         self._kind = "day"
         self._lines: list[UsageLine] = []
         self._series: list[QLineSeries] = []
-        self._hover: int | None = None
-        self._x = QValueAxis()
-        self._x.setVisible(False)
-        self._y = QValueAxis()
-        self._y.setTitleText("kWh")
-        self._y.setTickCount(4)
-        self._y.setLabelFormat("%.2f")
-        self.chart().addAxis(self._x, BOTTOM)
-        self.chart().addAxis(self._y, LEFT)
-        theme().changed.connect(self._apply_theme)
         self.show_lines([], [], "day")
 
     def _label(self, key, tooltip: bool = False) -> str:
@@ -386,75 +411,45 @@ class UsageChart(QChartView):
             return key.strftime("%B %Y" if tooltip else "%b %Y")
         return key.strftime("%a %d %b" if tooltip else "%d %b")
 
-    def _apply_theme(self) -> None:
-        style_chart(self)
-        accent = theme().colors.accent
-        for series, line in zip(self._series, self._lines, strict=True):
-            series.setPen(QPen(QColor(line.color or accent), 2.5 if line.color is None else 2))
-        self.viewport().update()
-
     def show_lines(self, lines: Sequence[UsageLine], keys: Sequence, kind: str = "day") -> None:
         """`kind` is "day" / "month" (keys are dates) or "hour" (keys are hours); each line has a value per key."""
         self._lines, self._keys, self._kind, self._hover = list(lines), list(keys), kind, None
         self.chart().setTitle(self.TITLES[kind])
-        for series in self._series:
-            self.chart().removeSeries(series)
-        self._series = []
-        for line in self._lines:
-            series = QLineSeries()
-            series.append([QPointF(i, wh / 1000) for i, wh in enumerate(line.wh) if wh is not None])
-            series.setPointsVisible(len(self._keys) <= 40)
-            self.chart().addSeries(series)
-            series.attachAxis(self._x)
-            series.attachAxis(self._y)
-            self._series.append(series)
+        self._clear_series()
+        self._series = [
+            self._add_series([(i, wh / 1000) for i, wh in enumerate(line.wh) if wh is not None], line.color)
+            for line in self._lines
+        ]
         self._x.setRange(-0.5, max(len(self._keys), 1) - 0.5)
-        peak = max((wh for line in self._lines for wh in line.wh if wh is not None), default=0)
-        self._y.setRange(0, peak / 1000 * 1.2 or 1)
+        peak = max((wh for line in self._lines for wh in line.wh if wh is not None), default=0) / 1000
+        self._fit_y(peak, 0.1, 2 if peak < 10 else 0)
         self._apply_theme()
 
-    def _index_at(self, x: float) -> int | None:
-        area = self.chart().mapRectToScene(self.chart().plotArea())
+    def _label_row(self) -> Sequence[tuple[float, str]]:
+        """Sparse labels so a whole quarter stays readable at small widths."""
+        count = len(self._keys)
+        if not count:
+            return ()
+        ticks = min(count, max(2, int(self._plot_area().width() / 100)))
+        indices = sorted({round(i * (count - 1) / max(1, ticks - 1)) for i in range(ticks)})
+        return [((index + 0.5) / count, self._label(self._keys[index])) for index in indices]
+
+    def _hover_at(self, x: float) -> int | None:
+        area = self._plot_area()
         if not self._keys or not area.left() <= x <= area.right():
             return None
         return min(len(self._keys) - 1, int((x - area.left()) / area.width() * len(self._keys)))
 
-    def mouseMoveEvent(self, event) -> None:
-        super().mouseMoveEvent(event)
-        self._hover = self._index_at(self.mapToScene(event.position().toPoint()).x())
-        self.viewport().update()
-
-    def leaveEvent(self, event) -> None:
-        super().leaveEvent(event)
-        self._hover = None
-        self.viewport().update()
-
-    def drawForeground(self, painter: QPainter, rect: QRectF) -> None:
-        super().drawForeground(painter, rect)
-        if not self._keys:
-            return
-        # Paint sparse date labels so a whole quarter remains readable at small widths.
-        area = self.chart().mapRectToScene(self.chart().plotArea())
-        count = len(self._keys)
-        ticks = min(count, max(2, int(area.width() / 100)))
-        indices = sorted({round(i * (count - 1) / max(1, ticks - 1)) for i in range(ticks)})
-        painter.save()
-        painter.setPen(QColor(theme().colors.muted))
-        painter.setFont(QFont("Segoe UI", 9))
-        for index in indices:
-            x = area.left() + (index + 0.5) * area.width() / count
-            label = self._label(self._keys[index])
-            painter.drawText(QRectF(x - 36, area.bottom() + 8, 72, 22), Qt.AlignmentFlag.AlignCenter, label)
-        if self._hover is not None:
-            accent = theme().colors.accent
-            x = area.left() + (self._hover + 0.5) * area.width() / count
-            dots, entries = [], []
-            for line in self._lines:
-                wh = line.wh[self._hover]
-                if wh is not None:
-                    y = area.bottom() - wh / 1000 / (self._y.max() or 1) * area.height()
-                    dots.append((QPointF(x, y), line.color or accent))
-                    entries.append((line.color or accent, f"{line.name}  {wh / 1000:.2f} kWh"))
-            if entries:
-                paint_readout(painter, area, x, self._label(self._keys[self._hover], tooltip=True), dots, entries)
-        painter.restore()
+    def _readout(self, area: QRectF):
+        accent = theme().colors.accent
+        x = area.left() + (self._hover + 0.5) * area.width() / len(self._keys)
+        dots, entries = [], []
+        for line in self._lines:
+            wh = line.wh[self._hover]
+            if wh is not None:
+                y = area.bottom() - wh / 1000 / (self._y.max() or 1) * area.height()
+                dots.append((QPointF(x, y), line.color or accent))
+                entries.append((line.color or accent, f"{line.name}  {wh / 1000:.2f} kWh"))
+        if not entries:
+            return None
+        return x, self._label(self._keys[self._hover], tooltip=True), dots, entries

@@ -97,7 +97,7 @@ class Theme(QObject):
             palette.setColor(QPalette.ColorGroup.Disabled, role, QColor(c.muted))
         self._app.setPalette(palette)
         self._app.setStyleSheet(f"""
-            QMainWindow, QDialog, QTabWidget::pane {{ background: {c.background}; }}
+            QMainWindow, QDialog {{ background: {c.background}; }}
             QWidget {{ color: {c.text}; }}
             QLabel {{ background: transparent; }}
             QLabel[tone="muted"] {{ color: {c.muted}; }}
@@ -128,11 +128,11 @@ class Theme(QObject):
                 selection-background-color: {c.selected}; selection-color: {c.text}; outline: none; }}
             QLineEdit:focus, QDoubleSpinBox:focus {{ border-color: {c.accent}; }}
             QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{ width: 20px; }}
-            QTabWidget::pane {{ border: none; border-top: 1px solid {c.border}; top: -1px; }}
-            QTabBar::tab {{ background: transparent; color: {c.muted}; padding: 12px 20px;
-                margin-right: 10px; border-bottom: 3px solid transparent; }}
-            QTabBar::tab:selected {{ color: {c.text}; border-bottom-color: {c.accent}; font-weight: 600; }}
-            QTabBar::tab:focus {{ background: {c.selected}; }}
+            QFrame#Rail {{ background: {c.surface}; border-right: 1px solid {c.border}; }}
+            QToolButton[nav="true"] {{ background: transparent; border: none; border-radius: 12px; padding: 0; }}
+            QToolButton[nav="true"]:hover {{ background: {c.raised}; }}
+            QToolButton[nav="true"]:checked {{ background: {c.selected}; }}
+            QToolButton[nav="true"]:focus {{ border: 2px solid {c.accent}; }}
             QListWidget {{ background: transparent; border: none; outline: none; }}
             QListWidget::item {{ background: transparent; border: none; padding: 0; }}
             QScrollArea {{ background: transparent; border: none; }}

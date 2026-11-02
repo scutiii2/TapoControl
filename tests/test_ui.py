@@ -147,6 +147,7 @@ def test_refresh_preserves_card_identity_and_selection(window):
 
 def test_resizing_keeps_card_controls_inside_viewport(window, app):
     w, _, _ = window
+    w._tabs.setCurrentWidget(w._tabs.widget(1))  # Devices
     w.show()
     app.processEvents()
     w.resize(760, 640)
@@ -176,7 +177,7 @@ def test_auth_failure_uses_account_tab_and_resumes_after_submission(window, monk
     assert w._timer.isActive()
     assert not w._login.password.text()
     assert w._tabs.currentIndex() == 0
-    assert len(runner.pending) == 2
+    assert len(runner.pending) == 6  # a snapshot, and energy and hours for the Overview, per plug
 
 
 def test_initial_account_tab_submission_scans_when_no_devices(window, monkeypatch):
@@ -464,3 +465,44 @@ def test_timer_menu_sets_timer_and_card_shows_countdown(window):
     runner.finish()
     assert ("clear_timer", ip) in controller.calls and w._cards[ip]._ip.text() == ip
     assert timer_note(95 * 60, True) == "on in 1 h 35 min" and timer_note(5, False) == "off in 1 min"
+
+
+def test_side_tabs_switch_pages_and_report_changes(app):
+    from PySide6.QtWidgets import QLabel
+
+    from ui.side_tabs import SideTabs
+
+    tabs = SideTabs()
+    first, second = QLabel("a"), QLabel("b")
+    tabs.addTab(first, "overview", "Overview")
+    tabs.addTab(second, "settings", "Settings", bottom=True)
+    seen = []
+    tabs.currentChanged.connect(seen.append)
+    assert tabs.currentWidget() is first and tabs._buttons[0].isChecked()
+    tabs._buttons[1].click()
+    assert tabs.currentWidget() is second and seen == [1] and tabs._buttons[1].isChecked()
+    tabs.setCurrentWidget(second)  # already open: no change signal
+    assert seen == [1] and tabs.widget(0) is first
+    assert tabs._buttons[0].toolTip() == "Overview" and not tabs._buttons[0].icon().isNull()
+
+
+def test_overview_shows_totals_and_fetches_once_a_minute(window):
+    w, runner, controller = window
+    assert w._tabs.currentWidget() is w._overview
+    w.refresh()
+    runner.finish()
+    assert w._overview._today.text() == "0.84 kWh"  # both plugs added up
+    assert w._overview._now.text() == "69.6 W"  # the fake snapshot gives 34.8 W per plug
+    assert w._overview._plugs.text() == "2 of 2"
+    assert [line.name for line in w._overview._chart._lines] == ["Overall", "Desk", "Lamp"]
+    assert w._overview._chart._lines[0].wh == [10, 0, 14]  # fake hours [5, 0, 7] per plug, summed
+    w._toggles._boxes["overall"].setChecked(False)  # the Devices toggles are separate
+    assert [line.name for line in w._overview._chart._lines][0] == "Overall"
+    controller.calls.clear()
+    w.refresh()
+    runner.finish()
+    assert ("energy", "192.168.1.2") not in controller.calls  # fetched less than a minute ago
+    w._tabs.setCurrentWidget(w._login)
+    w._overview_fetched.clear()
+    w.refresh()
+    assert not any(c[0] == "energy" for c in controller.calls)  # nothing fetched while the Overview is closed

@@ -19,21 +19,22 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QSystemTrayIcon,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from core.async_runner import AsyncRunner
 from core.alerts import AlertEngine
-from core.controller import AuthError, TapoController, merge_power
+from core.controller import AuthError, EnergySummary, TapoController, merge_power
 from core.profile import fill_gaps, total_series
 from core.store import DeviceInfo, Store
 from ui.charts import OVERALL, Line, LineColors, LineToggles, LiveChart
 from ui.history_dialog import HistoryPanel
 from ui.login_dialog import LoginPanel
+from ui.overview_page import OverviewPage
 from ui.plug_card import PlugCard, timer_note
 from ui.settings_panel import SettingsPanel
+from ui.side_tabs import SideTabs
 from ui.theme import power_icon, theme
 
 REFRESH_MS = 5000
@@ -71,6 +72,8 @@ class MainWindow(QMainWindow):
         self._power_confirming: set[str] = set()
         self._cards: dict[str, PlugCard] = {}
         self._colors = LineColors()
+        self._energy: dict[str, EnergySummary] = {}  # latest energy totals, for the Overview
+        self._overview_fetched: dict[str, float] = {}  # ip -> monotonic time of the last Overview fetch
         self._long_failed: set[str] = set()
 
         self._list = QListWidget()
@@ -93,10 +96,7 @@ class MainWindow(QMainWindow):
         self._all_off = QPushButton("All off")
         self._all_on.clicked.connect(lambda: self.set_all_power(True))
         self._all_off.clicked.connect(lambda: self.set_all_power(False))
-        root = QWidget()
-        layout = QVBoxLayout(root)
-        layout.setContentsMargins(24, 18, 24, 8)
-        layout.setSpacing(16)
+        self._tabs = SideTabs()
         header = QHBoxLayout()
         self._logo = QLabel()
         self._logo.setFixedSize(42, 42)
@@ -111,11 +111,8 @@ class MainWindow(QMainWindow):
         headings.addWidget(subtitle)
         header.addLayout(headings, 1)
         header.addWidget(self._scan)
-        layout.addLayout(header)
-        self._tabs = QTabWidget()
-        self._tabs.setDocumentMode(True)
-        self._tabs.tabBar().setDrawBase(False)
-        self._tabs.setUsesScrollButtons(False)
+        self._tabs.content.setContentsMargins(24, 18, 24, 8)
+        self._tabs.content.insertLayout(0, header)
         devices = QWidget()
         devices_layout = QVBoxLayout(devices)
         devices_layout.setContentsMargins(0, 14, 0, 0)
@@ -156,18 +153,19 @@ class MainWindow(QMainWindow):
         splitter.addWidget(chart_box)
         splitter.setSizes([360, 260])
         devices_layout.addWidget(splitter, 1)
+        self._overview = OverviewPage(self._colors)
         self._history = HistoryPanel(self, store, runner, self._colors)
         self._history.auth_failed.connect(self._on_error)
         self._login = LoginPanel(self)
         self._settings = SettingsPanel(self, store)
         self._login.submitted.connect(self._save_login)
-        self._tabs.addTab(devices, "Devices")
-        self._tabs.addTab(self._history, "Energy")
-        self._tabs.addTab(self._login, "Account")
-        self._tabs.addTab(self._settings, "Settings")
+        self._tabs.addTab(self._overview, "overview", "Overview")
+        self._tabs.addTab(devices, "devices", "Devices")
+        self._tabs.addTab(self._history, "energy", "Energy")
+        self._tabs.addTab(self._login, "account", "Account", bottom=True)
+        self._tabs.addTab(self._settings, "settings", "Settings")
         self._tabs.currentChanged.connect(self._tab_changed)
-        layout.addWidget(self._tabs, 1)
-        self.setCentralWidget(root)
+        self.setCentralWidget(self._tabs)
         self.setMinimumSize(760, 640)
         self.resize(920, 900)
         note = QLabel("Refreshes every 5 seconds · Close to keep running in tray")
@@ -274,6 +272,8 @@ class MainWindow(QMainWindow):
         self._power_pending.clear()
         self._power_confirming.clear()
         self._history.clear()
+        self._energy.clear()
+        self._overview_fetched.clear()
         self._auth_required = False
         self._login.password.clear()
         self._login.set_message("Account saved.", error=False)
@@ -308,6 +308,48 @@ class MainWindow(QMainWindow):
             if ip not in self._inflight:
                 self._refresh_ip(ip)
         self._fetch_long()
+        self._fetch_overview()
+
+    def _fetch_overview(self) -> None:
+        """Energy and today's hours for the Overview: at most once a minute per plug, only while it is open."""
+        if self._tabs.currentWidget() is not self._overview or not self._can_send():
+            return
+        for ip in self._devices:
+            last = self._overview_fetched.get(ip)
+            if last is not None and time.monotonic() - last < LONG_REFRESH_S:
+                continue
+            self._overview_fetched[ip] = time.monotonic()
+            self._submit(self._controller.energy(ip), self._background(lambda r, ip=ip: self._on_energy(ip, r)))
+            self._submit(
+                self._controller.hourly_today(ip),
+                self._background(lambda r, ip=ip: self._overview.set_hours(ip, r or [])),
+            )
+
+    def _background(self, handler: Callable) -> Callable:
+        """Callback for secondary data: a bad login is reported, any other failure keeps the old value."""
+        def callback(result, error):
+            if isinstance(error, AuthError):
+                self._on_error(error)
+            elif not error:
+                handler(result)
+
+        return callback
+
+    def _on_energy(self, ip: str, summary: EnergySummary | None) -> None:
+        if summary:
+            self._energy[ip] = summary
+            self._render_overview()
+
+    def _render_overview(self) -> None:
+        price = self._store.price_per_kwh()
+        self._overview.set_plugs({ip: d.alias for ip, d in self._devices.items()})
+        on = sum(1 for is_on, _ in self._state.values() if is_on)
+        total = sum(w for _, w in self._state.values())
+        self._overview.show_live(total, on, len(self._state), price)
+        sums = [self._energy[ip] for ip in self._devices if ip in self._energy]
+        self._overview.show_energy(
+            sum(x.today_wh for x in sums) if sums else None, sum(x.month_wh for x in sums) if sums else None, price,
+        )
 
     def _refresh_ip(self, ip: str) -> None:
         if not self._can_send() or ip not in self._devices:
@@ -414,8 +456,11 @@ class MainWindow(QMainWindow):
             self._history.clear()
 
     def _tab_changed(self, index: int) -> None:
-        if self._tabs.widget(index) is self._history:
+        page = self._tabs.widget(index)
+        if page is self._history:
             self._load_history()
+        elif page is self._overview:
+            self._fetch_overview()
 
     def _card_action(self, ip: str, action: str) -> None:
         self._select_ip(ip)
@@ -536,6 +581,7 @@ class MainWindow(QMainWindow):
                 self._load_history()
         self._render_cards()
         self._render_chart()
+        self._render_overview()
 
     def _render_cards(self) -> None:
         selected = self._selected_ip()
