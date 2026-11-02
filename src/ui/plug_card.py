@@ -29,6 +29,10 @@ class PowerSwitch(QAbstractButton):
         painter.drawEllipse(QRectF(26 if self.isChecked() else 6, 8, 16, 16))
 
 
+def hourly_cost(watts: float, price_per_kwh: float) -> float:
+    return watts / 1000 * price_per_kwh
+
+
 class Sparkline(QWidget):
     """Recent watts of one plug, scaled to its own range."""
 
@@ -98,6 +102,10 @@ class PlugCard(QFrame):
         self._watts.setFixedWidth(90)
         self._watts.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._watts.setStyleSheet("font-size: 21px; font-weight: 600;")
+        self._cost = QLabel()
+        self._cost.setFixedWidth(90)
+        self._cost.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._cost.setProperty("tone", "muted")
         self._spark = Sparkline()
         self.toggle = PowerSwitch(self)
         self.toggle.setAccessibleName(f"Power for {ip}")
@@ -123,7 +131,11 @@ class PlugCard(QFrame):
         row.addLayout(labels, 1)
         row.addWidget(self._status)
         row.addWidget(self._spark)
-        row.addWidget(self._watts)
+        numbers = QVBoxLayout()
+        numbers.setSpacing(0)
+        numbers.addWidget(self._watts)
+        numbers.addWidget(self._cost)
+        row.addLayout(numbers)
         row.addWidget(self.toggle)
         row.addWidget(self._menu)
 
@@ -141,7 +153,7 @@ class PlugCard(QFrame):
         self.power_requested.emit(on)
 
     def update_state(self, name: str, state: tuple[bool, float] | None, selected: bool, busy: bool,
-                     samples: Sequence[float] = ()) -> None:
+                     samples: Sequence[float] = (), price: float = 0.0) -> None:
         self._name.setText(name)
         self._name.setTextFormat(Qt.TextFormat.PlainText)
         self._spark.set_values(samples if state else ())
@@ -149,6 +161,7 @@ class PlugCard(QFrame):
         self._status.setText("●  ON" if self._on else "●  OFF" if state else "Offline - retrying")
         self._status.setProperty("tone", "success" if self._on else "muted")
         self._watts.setText(f"{state[1]:.1f} W" if state else "—")
+        self._cost.setText(f"{hourly_cost(state[1], price):.2f} / h" if state and price else "")
         self.toggle.setChecked(self._on)
         self.toggle.setEnabled(state is not None and not busy)
         self.toggle.setToolTip("Updating power…" if busy else "Turn off" if self._on else "Turn on")

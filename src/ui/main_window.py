@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.async_runner import AsyncRunner
+from core.alerts import AlertEngine
 from core.controller import AuthError, TapoController, merge_power
 from core.profile import fill_gaps
 from core.store import DeviceInfo, Store
@@ -32,6 +33,7 @@ from ui.charts import LiveChart
 from ui.history_dialog import HistoryPanel
 from ui.login_dialog import LoginPanel
 from ui.plug_card import PlugCard
+from ui.settings_panel import SettingsPanel
 from ui.theme import power_icon, theme
 
 REFRESH_MS = 5000
@@ -57,6 +59,7 @@ class MainWindow(QMainWindow):
         self._samples: dict[str, deque[float]] = {}
         self._times: dict[str, deque[float]] = {}
         self._long: dict[str, list[tuple[float, float]]] = {}  # plug-stored 5-minute averages
+        self._alerts = AlertEngine()
         self._profiles: dict[str, tuple[float, dict]] = {}
         self._long_fetched: dict[str, tuple[int, float]] = {}  # ip -> (hours, monotonic time)
         self._failures: dict[str, int] = {}
@@ -150,10 +153,12 @@ class MainWindow(QMainWindow):
         self._history = HistoryPanel(self, store, runner)
         self._history.auth_failed.connect(self._on_error)
         self._login = LoginPanel(self)
+        self._settings = SettingsPanel(self, store)
         self._login.submitted.connect(self._save_login)
         self._tabs.addTab(devices, "Devices")
         self._tabs.addTab(self._history, "Energy")
         self._tabs.addTab(self._login, "Account")
+        self._tabs.addTab(self._settings, "Settings")
         self._tabs.currentChanged.connect(self._tab_changed)
         layout.addWidget(self._tabs, 1)
         self.setCentralWidget(root)
@@ -422,9 +427,18 @@ class MainWindow(QMainWindow):
             self._samples.setdefault(ip, deque(maxlen=SAMPLES)).append(state[1])
             self._times.setdefault(ip, deque(maxlen=SAMPLES)).append(now)
             self._store.add_sample(ip, now, state[1])
+        self._check_alerts(ip)
         self._render()
         if ip in self._power_confirming:
             self._refresh_ip(ip)
+
+    def _check_alerts(self, ip: str) -> None:
+        name = self._devices[ip].alias if ip in self._devices else ip
+        offline = self._failures.get(ip, 0) >= OFFLINE_RESCAN_AFTER
+        for message in self._alerts.check(
+            ip, name, self._state.get(ip), offline, self._settings.alert_settings(), time.time()
+        ):
+            self._tray.showMessage("TapoControl", message, QSystemTrayIcon.MessageIcon.Warning, 8000)
 
     def _maybe_rescan(self, ip: str) -> None:
         """A plug that keeps failing may have a new IP (DHCP); rescan, rate limited."""
@@ -477,7 +491,9 @@ class MainWindow(QMainWindow):
         self._list.setVisible(bool(self._devices))
         online = sum(ip in self._state for ip in self._devices)
         total = sum(w for _, w in self._state.values())
-        self._count.setText(f"DEVICES · {len(self._devices)} plugs · {online} online · {total:.1f} W now")
+        price = self._store.price_per_kwh()
+        cost = f" · {total / 1000 * price:.2f} / h" if price else ""
+        self._count.setText(f"DEVICES · {len(self._devices)} plugs · {online} online · {total:.1f} W now{cost}")
         enabled = self._controller is not None and not self._auth_required
         self._scan.setEnabled(enabled)
         self._all_on.setEnabled(enabled and bool(self._devices))
@@ -492,11 +508,13 @@ class MainWindow(QMainWindow):
 
     def _render_cards(self) -> None:
         selected = self._selected_ip()
+        price = self._store.price_per_kwh()
         for ip, card in self._cards.items():
             card.update_state(
                 self._devices[ip].alias, self._state.get(ip), ip == selected,
                 ip in self._power_pending or self._controller is None or self._auth_required,
                 self._samples.get(ip, ()),
+                price,
             )
 
     def _window_changed(self) -> None:

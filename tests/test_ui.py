@@ -347,3 +347,44 @@ def test_gap_is_dashed_through_plug_estimates():
     assert bridge.count() == 4  # last reading, two plug averages inside the gap, next reading
     chart.show_samples([5.0, 6.0], "x", [now - 500, now - 20])
     assert chart._bridges[0].count() == 2  # no estimates: straight dashed line
+
+
+def test_cards_show_hourly_cost_when_a_tariff_is_set(window):
+    w, runner, _ = window
+    w._store.set_price_per_kwh(10.0)
+    w._state["192.168.1.3"] = (True, 100.0)
+    w._render()
+    assert w._cards["192.168.1.3"]._cost.text() == "1.00 / h"
+    assert "/ h" in w._count.text()
+    w._store.set_price_per_kwh(0.0)
+    w._render()
+    assert w._cards["192.168.1.3"]._cost.text() == ""
+
+
+def test_alert_notification_uses_tray_and_settings_tab_saves(window, monkeypatch):
+    w, runner, _ = window
+    shown = []
+    monkeypatch.setattr(w._tray, "showMessage", lambda title, text, *args: shown.append(text))
+    w._settings.watts.setValue(50)
+    assert w._store.setting("alert_watts") == "50"
+    w._on_snapshot("192.168.1.3", (True, 80.0), None)
+    assert shown and "80 W" in shown[0]
+    w._on_snapshot("192.168.1.3", (True, 90.0), None)
+    assert len(shown) == 1
+
+
+def test_csv_export_writes_shown_rows(window, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QFileDialog
+
+    w, runner, controller = window
+    panel = w._history
+    panel.load(controller, "192.168.1.2", "Desk")
+    runner.finish()
+    runner.finish()
+    target = tmp_path / "out.csv"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), ""))
+    panel._range.setCurrentIndex(3)  # all time, monthly
+    assert panel._export.isEnabled()
+    panel._export_csv()
+    assert target.read_text(encoding="utf-8").splitlines()[0] == "month,kWh,cost"
+    assert "days stored since" in panel._detail.text()

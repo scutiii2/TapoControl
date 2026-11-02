@@ -87,6 +87,14 @@ class Store:
             else:
                 self._db.execute("DELETE FROM nicknames WHERE ip = ?", (ip,))
 
+    def setting(self, key: str, default: str = "") -> str:
+        row = self._db.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._db:
+            self._db.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, value))
+
     def price_per_kwh(self) -> float:
         row = self._db.execute("SELECT value FROM settings WHERE key = 'price_per_kwh'").fetchone()
         return float(row[0]) if row else 0.0

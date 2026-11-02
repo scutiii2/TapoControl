@@ -12,7 +12,8 @@ def main() -> None:
     app.setQuitOnLastWindowClosed(False)  # window hides to tray
     store = Store(default_db_path())
     window = MainWindow(store, AsyncRunner())
-    window.show()
+    if "--minimized" not in sys.argv:  # autostart keeps the window in the tray
+        window.show()
     window.start()
     code = app.exec()
     store.close()

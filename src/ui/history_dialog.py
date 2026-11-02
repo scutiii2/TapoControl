@@ -1,10 +1,13 @@
 """Embedded Energy tab: totals, tariff and daily history for the selected plug."""
 from datetime import date, timedelta
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFileDialog, QPushButton, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from core.async_runner import AsyncRunner
+from core.export import history_csv
 from core.controller import AuthError, EnergySummary, TapoController, UsageSummary, monthly_totals, quarter_start
 from core.store import Store
 from ui.charts import DailyBars
@@ -32,6 +35,8 @@ class HistoryPanel(QWidget):
         self._ip: str | None = None
         self._controller: TapoController | None = None
         self._rows: list[tuple[date, int]] = []
+        self._shown: tuple[list, str] = ([], "day")
+        self._loading_older = False
 
         self._price = QDoubleSpinBox(decimals=4, maximum=1000, value=store.price_per_kwh())
         self._price.setMinimumWidth(140)
@@ -60,6 +65,9 @@ class HistoryPanel(QWidget):
         self._range.setCurrentIndex(QUARTER)
         self._range.currentIndexChanged.connect(self._range_changed)
         header.addWidget(self._range)
+        self._export = QPushButton("Export CSV…")
+        self._export.clicked.connect(self._export_csv)
+        header.addWidget(self._export)
         totals = QHBoxLayout()
         self._today, self._today_cost = self._total_card(totals, "TODAY")
         self._month, self._month_cost = self._total_card(totals, "THIS MONTH")
@@ -126,6 +134,9 @@ class HistoryPanel(QWidget):
         self._today_cost.setText("Estimated cost —")
         self._month_cost.setText("Estimated cost —")
         self._rows = []
+        self._shown = ([], "day")
+        self._loading_older = False
+        self._export.setEnabled(False)
         self._hours: list[int] = []
         self._runtime.setText("—")
         self._runtime_month.setText("This month —")
@@ -227,24 +238,48 @@ class HistoryPanel(QWidget):
                 self._backfill()
         # Stored days stay visible even when the plug is unreachable.
         self._rows = self._store.daily(self._ip)
+        self._set_detail()
         self._render_history()
+
+    def _set_detail(self) -> None:
+        """Say how much daily history is on file, so a missing history is visible rather than silent."""
+        if self._loading_older or self._ip is None:
+            return
+        stored = f"{len(self._rows)} days stored since {self._rows[0][0]:%d %b %Y}" if self._rows else "no daily history stored"
+        self._detail.setText(f"{self._ip} · {stored}")
+
+    def _export_csv(self) -> None:
+        rows, kind = self._shown
+        name = f"{self._name.text()} - {RANGES[self._range.currentIndex()]}.csv"
+        path, _ = QFileDialog.getSaveFileName(self, "Export energy history", name, "CSV files (*.csv)")
+        if not path:
+            return
+        try:
+            Path(path).write_text(history_csv(rows, kind, self._price.value()), encoding="utf-8", newline="")
+            self._history_error.hide()
+        except OSError as error:
+            self._history_error.setText("Could not save the file.")
+            self._history_error.setToolTip(str(error))
+            self._history_error.show()
 
     def _backfill(self) -> None:
         """One-off fetch of every older quarter the plug remembers."""
         revision, ip = self._revision, self._ip
+        self._loading_older = True
         self._detail.setText(f"{ip} · Loading older history…")
 
         def done(rows, error):
             if revision != self._revision:
                 return
+            self._loading_older = False
             if error:
                 self._detail.setText(f"{ip} · Older history unavailable")
                 self._detail.setToolTip(str(error))
                 return
             self._store.save_daily(ip, rows or [])
             self._store.set_backfilled(ip)
-            self._detail.setText(f"{ip} · Selected plug")
             self._rows = self._store.daily(ip)
+            self._set_detail()
             self._render_history()
 
         self._runner.submit(self._controller.full_history(ip), done)
@@ -262,7 +297,10 @@ class HistoryPanel(QWidget):
             rows = [r for r in rows if r[0] >= (date.today().replace(day=1) - timedelta(days=335)).replace(day=1)]
         if choice in (YEAR, ALL):
             rows = monthly_totals(rows)
-        self._bars.show_rows(rows, kind={HOURLY: "hour", QUARTER: "day"}.get(choice, "month"))
+        kind = {HOURLY: "hour", QUARTER: "day"}.get(choice, "month")
+        self._shown = (rows, kind)
+        self._export.setEnabled(bool(rows))
+        self._bars.show_rows(rows, kind=kind)
         self._empty.setText("No energy data is available for this plug yet.")
         self._empty.setVisible(not rows and not self._history_error.isVisible())
 
