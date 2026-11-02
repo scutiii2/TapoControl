@@ -1,13 +1,14 @@
 """Chart widgets: rolling live watts and usage per day, month or hour, built on one shared base."""
 import time
+import math
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
-from PySide6.QtCore import QMargins, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QWidget
+from PySide6.QtCharts import QAreaSeries, QChart, QChartView, QLineSeries, QValueAxis
+from PySide6.QtCore import QMargins, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QLinearGradient, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QCheckBox, QGridLayout, QLayout, QWidget
 
 from ui import tokens as t
 from ui.theme import series_color, theme
@@ -41,11 +42,13 @@ def style_chart(view: QChartView) -> None:
     chart.setTitleBrush(QColor(colors.text))
     chart.setTitleFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
     view.setStyleSheet("background: transparent; border: none;")
+    label_font = QFont(t.FONT_FAMILY)
+    label_font.setPixelSize(t.FONT_CAPTION)
     for axis in chart.axes():
         axis.setLabelsBrush(QColor(colors.muted))
-        axis.setLabelsFont(QFont("Segoe UI", 9))
+        axis.setLabelsFont(label_font)
         axis.setTitleBrush(QColor(colors.muted))
-        axis.setTitleFont(QFont("Segoe UI", 9))
+        axis.setTitleFont(label_font)
         axis.setLineVisible(False)
         axis.setGridLinePen(QPen(QColor(colors.border), 0.5))
 
@@ -81,16 +84,20 @@ class LineToggles(QWidget):
 
     changed = Signal()
 
-    def __init__(self, colors: LineColors):
+    def __init__(self, colors: LineColors, *, include_overall: bool = True):
         super().__init__()
         self._colors = colors
+        self._include_overall = include_overall
         self._boxes: dict[str, QCheckBox] = {}
         self._signature: tuple = ()
         self._names: list[tuple[str, str]] = []
         self.hidden: set[str] = set()
-        self._row = QHBoxLayout(self)
+        self._row = QGridLayout(self)
         self._row.setContentsMargins(0, 0, 0, 0)
-        self._row.setSpacing(t.SP_LG)
+        self._row.setHorizontalSpacing(t.SP_LG)
+        self._row.setVerticalSpacing(t.SP_XS)
+        self._row.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        self._used_columns = 0
         theme().changed.connect(self._retheme)
 
     def _retheme(self) -> None:
@@ -113,20 +120,55 @@ class LineToggles(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         self._boxes = {}
-        if names:
+        if names and self._include_overall:
             self._add(OVERALL, "Overall", line_color(None))
         for key, label in names:
             self._add(key, label, line_color(self._colors(key)))
-        self._row.addStretch(1)
+        self._reflow()
 
     def _add(self, key: str, label: str, color: str) -> None:
         box = QCheckBox(label)
-        box.setMinimumHeight(t.TARGET - t.SP_SM)  # a comfortable click area, not just the tick
-        box.setIcon(swatch(color))
+        box.setToolTip(label)
+        box.setAccessibleName(label)
+        box.setMinimumHeight(24)
+        box.setStyleSheet(
+            "QCheckBox { font-size: 10px; spacing: 5px; }"
+            f"QCheckBox::indicator {{ width: 6px; height: 6px; border: 1px solid {color}; border-radius: 3px; }}"
+            f"QCheckBox::indicator:checked {{ background: {color}; }}"
+        )
         box.setChecked(self.shown(key))
         box.toggled.connect(lambda on, key=key: self._toggled(key, on))
-        self._row.addWidget(box)
         self._boxes[key] = box
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(0, 24)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._reflow()
+
+    def _reflow(self) -> None:
+        while self._row.count():
+            self._row.takeAt(0)
+        for column in range(self._used_columns + 1):
+            self._row.setColumnStretch(column, 0)
+        row, col, used, maximum = 0, 0, 0, 0
+        for box in self._boxes.values():
+            box.ensurePolished()
+            label = box.fontMetrics().elidedText(
+                box.accessibleName(), Qt.TextElideMode.ElideRight, max(0, self.width() - 24)
+            )
+            box.setText(label.replace("&", "&&"))
+            box.setMaximumWidth(max(24, self.width()))
+            width = box.sizeHint().width() + t.SP_LG
+            if col and used + width > self.width():
+                row, col, used = row + 1, 0, 0
+            self._row.addWidget(box, row, col, Qt.AlignmentFlag.AlignLeft)
+            col, used = col + 1, used + width
+            maximum = max(maximum, col)
+        self._used_columns = maximum
+        self._row.setColumnStretch(maximum, 1)
+        self.setMinimumHeight((row + 1) * 24 + row * t.SP_XS)
 
     def _toggled(self, key: str, on: bool) -> None:
         self.hidden.discard(key) if on else self.hidden.add(key)
@@ -191,6 +233,10 @@ class BaseChart(QChartView):
         chart.addAxis(self._x, BOTTOM)
         chart.addAxis(self._y, LEFT)
         self._drawn: list[tuple[QLineSeries, int | None, bool]] = []  # series, color slot (None: overall), dashed
+        self.fill_first_series = False
+        self._areas: list[QAreaSeries] = []
+        # Keep Python wrappers alive: QAreaSeries does not retain them reliably in PySide6.
+        self._area_bounds: list[tuple[QLineSeries, QLineSeries]] = []
         self._empty_text = ""
         self._hover = None
         theme().changed.connect(self._apply_theme)
@@ -204,11 +250,28 @@ class BaseChart(QChartView):
                 series.setPen(QPen(QColor(color), 1.5, Qt.PenStyle.DashLine))
             else:  # the overall is the heavier line, so it also differs from the plugs by weight, not only by color
                 series.setPen(QPen(QColor(line_color(slot)), 3 if slot is None else 2))
+        for area in self._areas:
+            gradient = QLinearGradient(0, 0, 0, 1)
+            gradient.setCoordinateMode(QLinearGradient.CoordinateMode.ObjectBoundingMode)
+            top = QColor("#91b88b")
+            top.setAlphaF(0.25)
+            bottom = QColor(top)
+            bottom.setAlpha(0)
+            gradient.setColorAt(0, top)
+            gradient.setColorAt(1, bottom)
+            area.setBrush(QBrush(gradient))
+            area.setPen(QPen(Qt.PenStyle.NoPen))
         self.viewport().update()
 
     def _clear_series(self) -> None:
+        for area in self._areas:
+            self.chart().removeSeries(area)
+            area.deleteLater()
+        self._areas = []
+        self._area_bounds = []
         for series, _, _ in self._drawn:
             self.chart().removeSeries(series)
+            series.deleteLater()
         self._drawn = []
 
     def _add_series(
@@ -217,6 +280,17 @@ class BaseChart(QChartView):
         series = QLineSeries()
         series.append([QPointF(x, y) for x, y in points])
         series.setPointsVisible(not dashed and len(points) <= MARKER_LIMIT)
+        if self.fill_first_series and not self._drawn and points and not dashed:
+            upper = QLineSeries()
+            upper.append([QPointF(x, y) for x, y in points])
+            lower = QLineSeries()
+            lower.append([QPointF(x, 0) for x, _ in points])
+            area = QAreaSeries(upper, lower)
+            self.chart().addSeries(area)
+            area.attachAxis(self._x)
+            area.attachAxis(self._y)
+            self._areas.append(area)
+            self._area_bounds.append((upper, lower))
         self.chart().addSeries(series)
         series.attachAxis(self._x)
         series.attachAxis(self._y)
@@ -224,8 +298,11 @@ class BaseChart(QChartView):
         return series
 
     def _fit_y(self, peak: float, minimum: float, decimals: int) -> None:
-        self._y.setRange(0, max(minimum, peak * 1.2))
-        self._y.applyNiceNumbers()
+        target = max(minimum, peak * 1.2)
+        raw_step = target / 3
+        magnitude = 10 ** math.floor(math.log10(raw_step))
+        step = next(factor * magnitude for factor in (1, 2, 5, 10) if factor * magnitude >= raw_step)
+        self._y.setRange(0, 3 * step)
         self._y.setLabelFormat(f"%.{decimals}f")
 
     def _plot_area(self) -> QRectF:
@@ -266,7 +343,9 @@ class BaseChart(QChartView):
         area = self._plot_area()
         painter.save()
         painter.setPen(QColor(theme().colors.muted))
-        painter.setFont(QFont("Segoe UI", 9))
+        font = QFont(t.FONT_FAMILY)
+        font.setPixelSize(t.FONT_CAPTION)
+        painter.setFont(font)
         for fraction, text in self._label_row():
             x = area.left() + fraction * area.width()
             box = QRectF(x - 40, area.bottom() + 8, 80, 18)
@@ -375,7 +454,7 @@ class LiveChart(BaseChart):
         return self._max - (time.time() - ts) / self._span * self._max
 
     def _label_row(self) -> Sequence[tuple[float, str]]:
-        return ((0, ago_label(self._span)), (0.5, ago_label(self._span / 2)), (1, "now"))
+        return [(i / 5, ago_label(self._span * (1 - i / 5)) if i < 5 else "Now") for i in range(6)]
 
     def _hover_at(self, x: float) -> float | None:
         """Slot of the reading nearest the cursor, over all lines."""

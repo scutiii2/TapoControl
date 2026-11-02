@@ -31,9 +31,9 @@ DARK = Colors(
     ("#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"),
 )
 LIGHT = Colors(
-    "#f3f5f9", "#ffffff", "#edf1f6", "#c7d0de", "#7a889e", "#192332", "#53637b",
-    "#185cce", "#ffffff", "#eaf2ff", "#15765b", "#b32632",
-    ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"),
+    "#f6f8f5", "#ffffff", "#eff3ec", "#e3e9e3", "#718077", "#20322c", "#718077",
+    "#287351", "#ffffff", "#eaf2e9", "#287351", "#b32632",
+    ("#428362", "#a4b875", "#d2b985", "#aab4a9", "#9c6686", "#367b7a", "#7964a0", "#ad6858"),
 )
 
 
@@ -79,7 +79,8 @@ def power_icon(color: str) -> QIcon:
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(color))
         painter.drawRoundedRect(QRectF(1, 1, 30, 30), 8, 8)
-        painter.setPen(QPen(QColor("#132137"), 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        foreground = "#ffffff" if QColor(color).lightness() < 128 else "#132137"
+        painter.setPen(QPen(QColor(foreground), 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawArc(QRectF(8, 8, 16, 17), 135 * 16, 270 * 16)
         painter.drawLine(16, 7, 16, 16)
@@ -95,11 +96,12 @@ class Theme(QObject):
         super().__init__(app)
         self.setObjectName("tapoTheme")
         self._app = app
-        self.colors = palette_for(app.styleHints().colorScheme() == Qt.ColorScheme.Dark)
+        self.colors = LIGHT
         app.setStyle("Fusion")
-        app.setFont(QFont("Segoe UI", 10))
-        app.styleHints().colorSchemeChanged.connect(self.apply)
-        self.apply(app.styleHints().colorScheme())
+        font = QFont(t.FONT_FAMILY)
+        font.setPixelSize(t.FONT_BODY)
+        app.setFont(font)
+        self.apply(Qt.ColorScheme.Light)
 
     def apply(self, scheme: Qt.ColorScheme) -> None:
         self.colors = c = palette_for(scheme == Qt.ColorScheme.Dark)
@@ -119,7 +121,7 @@ class Theme(QObject):
         self._app.setPalette(palette)
         self._app.setStyleSheet(f"""
             QMainWindow, QDialog {{ background: {c.background}; }}
-            QWidget {{ color: {c.text}; }}
+            QWidget {{ color: {c.text}; font-family: '{t.FONT_FAMILY}'; font-size: {t.FONT_BODY}px; }}
             QLabel {{ background: transparent; }}
             QLabel[tone="muted"] {{ color: {c.muted}; }}
             QLabel[tone="success"] {{ color: {c.success}; }}
@@ -127,9 +129,18 @@ class Theme(QObject):
             QLabel[role="title"] {{ font-size: {t.FONT_TITLE}px; font-weight: 600; }}
             QLabel[role="heading"] {{ font-size: {t.FONT_HEADING}px; font-weight: 600; }}
             QLabel[role="metric"] {{ font-size: {t.FONT_METRIC}px; font-weight: 600; }}
+            QLabel[role="caption"] {{ font-size: {t.FONT_CAPTION}px; color: {c.muted}; }}
+            QLabel[role="small"] {{ font-size: {t.FONT_SMALL}px; }}
+            QLabel[role="eyebrow"] {{ font-size: 10px; font-weight: 700; letter-spacing: 1.5px; color: {c.muted}; }}
+            QLabel[role="brand"] {{ font-size: 19px; font-weight: 700; }}
+            QLabel[role="device-value"] {{ font-size: {t.FONT_VALUE}px; font-weight: 600; }}
+            QFrame#Network {{ background: {'#f5f8f3' if c is LIGHT else c.raised}; border-radius: 10px; }}
             QFrame[card="true"] {{ background: {c.surface}; border: 1px solid {c.border};
                 border-radius: {t.RADIUS_LG}px; }}
-            QFrame#DeviceCard[selected="true"] {{ background: {c.selected}; border-color: {c.accent}; }}
+            QFrame[highlight="true"] {{ background: {'#e9f1e6' if c is LIGHT else c.selected};
+                border: 1px solid {'#dce7d6' if c is LIGHT else c.border}; border-radius: 12px; }}
+            QFrame#DeviceCard[selected="true"] {{ border-color: {c.border}; }}
+            QFrame#DeviceCard {{ border-radius: 11px; }}
             QFrame#DeviceCard[offline="true"] QLabel {{ color: {c.muted}; }}
             QFrame#DeviceCard[offline="true"] {{ border-style: dashed; }}
             QPushButton, QToolButton {{ background: {c.surface}; border: 1px solid {c.border};
@@ -139,8 +150,12 @@ class Theme(QObject):
             QPushButton:focus, QToolButton:focus {{ border: 2px solid {c.accent}; }}
             QPushButton[primary="true"] {{ background: {c.accent}; color: {c.accent_text}; font-weight: 600; }}
             QPushButton:disabled, QToolButton:disabled {{ color: {c.muted}; background: {c.raised}; }}
+            QPushButton[quiet="true"], QToolButton[quiet="true"] {{ background: transparent; border: none;
+                padding: 0; font-size: 10px; color: {c.muted}; }}
+            QPushButton[compact="true"] {{ font-size: 10px; padding: 6px 12px; min-height: 16px; }}
             QToolButton::menu-indicator {{ image: none; }}
-            QLineEdit, QDoubleSpinBox {{ background: {c.surface}; color: {c.text}; border: 1px solid {c.control};
+            QLineEdit, QDoubleSpinBox, QSpinBox {{ background: {c.surface}; color: {c.text};
+                border: 1px solid {c.control};
                 border-radius: {t.RADIUS_MD}px; padding: 8px; min-height: 18px;
                 selection-background-color: {c.accent}; }}
             QComboBox {{ background: {c.surface}; color: {c.text}; border: 1px solid {c.control};
@@ -152,14 +167,19 @@ class Theme(QObject):
             QLineEdit:focus, QDoubleSpinBox:focus {{ border-color: {c.accent}; }}
             QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{ width: 20px; }}
             QFrame#Rail {{ background: {c.surface}; border-right: 1px solid {c.border}; }}
-            QToolButton[nav="true"] {{ background: transparent; border: none;
-                border-radius: {t.RADIUS_MD}px; padding: 0; }}
+            QToolButton[nav="true"] {{ background: transparent; border: none; color: {c.muted};
+                border-radius: {t.RADIUS_MD}px; padding: 0; font-size: 14px; text-align: left;
+                min-height: 44px; max-height: 44px; }}
             QToolButton[nav="true"]:hover {{ background: {c.raised}; }}
-            QToolButton[nav="true"]:checked {{ background: {c.selected}; border-left: 3px solid {c.accent}; }}
+            QToolButton[nav="true"]:checked {{ background: {c.selected}; color: {c.accent}; }}
             QToolButton[nav="true"]:focus {{ border: 2px solid {c.accent}; }}
             QListWidget {{ background: transparent; border: none; outline: none; }}
             QListWidget::item {{ background: transparent; border: none; padding: 0; }}
             QScrollArea {{ background: transparent; border: none; }}
+            QScrollArea > QWidget > QWidget {{ background: transparent; }}
+            QCheckBox {{ font-size: 12px; spacing: 6px; }}
+            QCheckBox::indicator {{ width: 12px; height: 12px; border: 1px solid {c.control}; border-radius: 3px; }}
+            QCheckBox::indicator:checked {{ background: {c.accent}; }}
             QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
             QScrollBar::handle:vertical {{ background: {c.border}; border-radius: {t.RADIUS_SM}px; min-height: 24px; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}

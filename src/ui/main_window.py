@@ -1,22 +1,23 @@
 import time
+from datetime import date
 from collections import deque
 from collections.abc import Callable, Coroutine
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
-    QListWidget,
     QListWidgetItem,
     QListView,
     QMainWindow,
     QMenu,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QSystemTrayIcon,
     QVBoxLayout,
@@ -34,6 +35,7 @@ from ui.login_dialog import LoginPanel
 from ui.overview_page import OverviewPage
 from ui.plug_card import PlugCard, timer_note
 from ui.settings_panel import SettingsPanel
+from ui.device_grid import DeviceList
 from ui.side_tabs import SideTabs
 from ui import tokens as t
 from ui.theme import action_error, power_icon, theme
@@ -86,7 +88,7 @@ class MainWindow(QMainWindow):
         self._overview_fetched: dict[str, float] = {}  # ip -> monotonic time of the last Overview fetch
         self._long_failed: set[str] = set()
 
-        self._list = QListWidget()
+        self._list = DeviceList()
         self._list.setSpacing(t.SP_SM)
         self._list.setResizeMode(QListView.ResizeMode.Adjust)
         self._list.setMinimumHeight(100)
@@ -108,21 +110,50 @@ class MainWindow(QMainWindow):
         self._all_off.clicked.connect(lambda: self.set_all_power(False))
         self._tabs = SideTabs()
         header = QHBoxLayout()
-        self._logo = QLabel()
-        self._logo.setFixedSize(t.TARGET, t.TARGET)
-        header.addWidget(self._logo)
-        headings = QVBoxLayout()
-        headings.setSpacing(t.SP_XS)
+        header.setSpacing(t.SP_MD)
+        self._logo = self._tabs._brand_icon
+        header.addWidget(self._tabs.collapse_button)
+        breadcrumb = QLabel("Workspace /")
+        breadcrumb.setProperty("role", "small")
+        breadcrumb.setProperty("tone", "muted")
+        header.addWidget(breadcrumb)
         self._title = QLabel()
-        self._title.setProperty("role", "title")
+        self._title.setProperty("role", "small")
+        self._title.setProperty("tone", "muted")
+        header.addWidget(self._title, 1)
+        today = QLabel(date.today().strftime("%A, %B %#d"))
+        today.setProperty("role", "caption")
+        header.addWidget(today)
+        header.addWidget(self._scan)
+        self._scan.setProperty("primary", False)
+        intro = QHBoxLayout()
+        intro.setSpacing(t.SP_MD)
+        headings = QVBoxLayout()
+        headings.setSpacing(t.SP_SM)
+        eyebrow = QLabel("YOUR HOME, AT A GLANCE")
+        eyebrow.setProperty("role", "eyebrow")
+        self._headline = QLabel("A little less energy. A little more control.")
+        self._headline.setProperty("role", "title")
+        headline_font = self._headline.font()
+        headline_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, -1.1)
+        self._headline.setFont(headline_font)
+        self._headline.setWordWrap(True)
+        headings.addWidget(eyebrow)
+        headings.addWidget(self._headline)
         self._subtitle = QLabel()
         self._subtitle.setProperty("tone", "muted")
-        headings.addWidget(self._title)
+        self._subtitle.setProperty("role", "small")
+        self._subtitle.setWordWrap(True)
         headings.addWidget(self._subtitle)
-        header.addLayout(headings, 1)
-        header.addWidget(self._scan)
-        self._tabs.content.setContentsMargins(t.SP_XL, t.SP_LG, t.SP_XL, t.SP_SM)
+        intro.addLayout(headings, 1)
+        self._live = QLabel("●  Live · every 5s")
+        self._live.setProperty("role", "caption")
+        self._live.setStyleSheet("border: 1px solid #e3e9e3; border-radius: 16px; padding: 8px 13px;")
+        intro.addWidget(self._live, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._tabs.content.setContentsMargins(t.PAGE_X, t.PAGE_Y, t.PAGE_X, t.PAGE_BOTTOM)
+        self._tabs.content.setSpacing(t.SECTION_GAP)
         self._tabs.content.insertLayout(0, header)
+        self._tabs.content.insertLayout(1, intro)
         devices = QWidget()
         devices_layout = QVBoxLayout(devices)
         devices_layout.setContentsMargins(0, t.PAGE_TOP, 0, 0)
@@ -145,6 +176,7 @@ class MainWindow(QMainWindow):
         plugs_layout.addWidget(self._list, 1)
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.setChildrenCollapsible(False)
+        splitter.setMinimumHeight(560)
         splitter.addWidget(plugs)
         chart_box = QWidget()
         chart_layout = QVBoxLayout(chart_box)
@@ -163,14 +195,20 @@ class MainWindow(QMainWindow):
         splitter.addWidget(chart_box)
         splitter.setSizes([360, 260])
         devices_layout.addWidget(splitter, 1)
+        devices_scroll = QScrollArea()
+        devices_scroll.setWidgetResizable(True)
+        devices_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        devices_scroll.setWidget(devices)
         self._overview = OverviewPage(self._colors)
+        self._overview.card_added.connect(self._connect_card)
+        self._overview.all_power_requested.connect(self.set_all_power)
         self._history = HistoryPanel(self, store, runner, self._colors)
         self._history.auth_failed.connect(self._on_error)
         self._login = LoginPanel(self)
         self._settings = SettingsPanel(self, store)
         self._login.submitted.connect(self._save_login)
         self._tabs.addTab(self._overview, "overview", "Overview")
-        self._tabs.addTab(devices, "devices", "Devices")
+        self._tabs.addTab(devices_scroll, "devices", "Devices")
         self._tabs.addTab(self._history, "energy", "Energy")
         self._tabs.addTab(self._login, "account", "Account", bottom=True)
         self._tabs.addTab(self._settings, "settings", "Settings")
@@ -178,9 +216,9 @@ class MainWindow(QMainWindow):
         self._show_page(self._tabs.currentIndex())
         self.setCentralWidget(self._tabs)
         self.setMinimumSize(760, 640)
-        self.resize(920, 900)
-        note = QLabel("Refreshes every 5 seconds · Close to keep running in tray")
-        note.setProperty("tone", "muted")
+        self.resize(1440, 1060)
+        note = QLabel("Runs quietly in your system tray")
+        note.setProperty("role", "caption")
         self.statusBar().addPermanentWidget(note)
         self.statusBar().setSizeGripEnabled(False)
         self._setup_tray()
@@ -193,7 +231,7 @@ class MainWindow(QMainWindow):
     def _apply_theme(self) -> None:
         icon = power_icon(self._theme.colors.accent)
         self.setWindowIcon(icon)
-        self._logo.setPixmap(icon.pixmap(40, 40))
+        self._logo.setPixmap(icon.pixmap(35, 35))
         if hasattr(self, "_tray"):
             self._tray.setIcon(icon)
 
@@ -367,6 +405,11 @@ class MainWindow(QMainWindow):
         self._overview.show_energy(
             sum(x.today_wh for x in sums) if sums else None, sum(x.month_wh for x in sums) if sums else None, price,
         )
+        self._overview.show_device_energy({ip: self._energy[ip].today_wh for ip in self._devices if ip in self._energy})
+        self._overview.set_controls_enabled(self._can_send())
+        self._tabs.show_connection_count(len(self._state))
+        for ip, card in self._overview.device_cards.items():
+            self._update_card(ip, card)
 
     def _refresh_ip(self, ip: str) -> None:
         if not self._can_send() or ip not in self._devices:
@@ -478,7 +521,13 @@ class MainWindow(QMainWindow):
         """The header names the open page, so the icon rail is never the only orientation."""
         kind = self._tabs.kind(index)
         self._title.setText(PAGES[kind][0])
-        self._subtitle.setText(PAGES[kind][1])
+        self._headline.setText(
+            "A little less energy. A little more control." if kind == "overview" else PAGES[kind][0]
+        )
+        self._subtitle.setText(
+            "Keep an eye on your usage. Switch things off when you’re done." if kind == "overview" else PAGES[kind][1]
+        )
+        self._live.setVisible(kind in ("overview", "devices"))
         self._scan.setVisible(kind in ("overview", "devices"))
 
     def _tab_changed(self, index: int) -> None:
@@ -581,18 +630,14 @@ class MainWindow(QMainWindow):
             if ip in self._cards:
                 continue
             card = PlugCard(ip)
-            card.selected.connect(lambda ip=ip: self._select_ip(ip))
-            card.power_requested.connect(lambda on, ip=ip: self._toggle_ip(ip, on))
-            card.rename_requested.connect(lambda ip=ip: self._card_action(ip, "rename"))
-            card.energy_requested.connect(lambda ip=ip: self._card_action(ip, "energy"))
-            card.timer_requested.connect(lambda minutes, on, ip=ip: self._set_timer(ip, minutes, on))
-            card.timer_cancelled.connect(lambda ip=ip: self._clear_timer(ip))
+            self._connect_card(ip, card)
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, ip)
-            item.setSizeHint(QSize(0, 84))
+            item.setSizeHint(QSize(250, t.DEVICE_HEIGHT))
             self._list.addItem(item)
             self._list.setItemWidget(item, card)
             self._cards[ip] = card
+        self._list.fit_cards()
         if selected in self._devices:
             self._select_ip(selected)
         elif self._list.count():
@@ -618,16 +663,28 @@ class MainWindow(QMainWindow):
         self._render_overview()
 
     def _render_cards(self) -> None:
-        selected = self._selected_ip()
-        price = self._store.price_per_kwh()
         for ip, card in self._cards.items():
-            card.update_state(
-                self._devices[ip].alias, self._state.get(ip), ip == selected,
-                ip in self._power_pending or self._controller is None or self._auth_required,
-                self._samples.get(ip, ()),
-                price,
-                self._timer_note(ip),
-            )
+            self._update_card(ip, card)
+        for ip, card in self._overview.device_cards.items():
+            if ip in self._devices:
+                self._update_card(ip, card)
+
+    def _connect_card(self, ip: str, card: PlugCard) -> None:
+        """Both device surfaces use the same confirmed-state actions."""
+        card.selected.connect(lambda ip=ip: self._select_ip(ip))
+        card.power_requested.connect(lambda on, ip=ip: self._toggle_ip(ip, on))
+        card.rename_requested.connect(lambda ip=ip: self._card_action(ip, "rename"))
+        card.energy_requested.connect(lambda ip=ip: self._card_action(ip, "energy"))
+        card.timer_requested.connect(lambda minutes, on, ip=ip: self._set_timer(ip, minutes, on))
+        card.timer_cancelled.connect(lambda ip=ip: self._clear_timer(ip))
+
+    def _update_card(self, ip: str, card: PlugCard) -> None:
+        card.update_state(
+            self._devices[ip].alias, self._state.get(ip), ip == self._selected_ip(),
+            ip in self._power_pending or self._controller is None or self._auth_required,
+            self._samples.get(ip, ()), self._store.price_per_kwh(), self._timer_note(ip),
+        )
+        card.show_today(self._energy[ip].today_wh if ip in self._energy else None)
 
     def _window_changed(self) -> None:
         self._fetch_long()
@@ -681,6 +738,19 @@ class MainWindow(QMainWindow):
         hours = self._window.currentData()
         span = hours * 3600 if hours else None
         interval = 300 if hours else REFRESH_MS / 1000
+        keyed_lines = self._power_lines(hours)
+        title = f"{self._window.currentText()} · average watts" if hours else "Live watts"
+        if not self._devices:
+            title = "No plugs yet"
+        self._chart.show_lines([line for key, line in keyed_lines if self._toggles.shown(key)], title, span, interval)
+        live_lines = self._power_lines(0) if hours else keyed_lines
+        active = [(ip, line) for ip, line in live_lines if ip in self._state and self._state[ip][0]]
+        self._overview.show_power(active, "Live watts", None, REFRESH_MS / 1000)
+
+    def _power_lines(self, hours: int) -> list[tuple[str, Line]]:
+        """Build data once per requested window; the dashboard always keeps its own live window."""
+        span = hours * 3600
+        interval = 300 if hours else REFRESH_MS / 1000
         now = time.time()
         plugs = []  # (ip, readings, estimates)
         for ip in self._devices:
@@ -693,15 +763,11 @@ class MainWindow(QMainWindow):
                 if points:
                     estimates += fill_gaps(points, estimates, self._profile(ip), 2.5 * interval)
             plugs.append((ip, points, estimates))
-        lines = []
-        if self._toggles.shown(OVERALL) and plugs:  # the overall always sums every plug, shown or not
+        keyed_lines = []
+        if plugs:  # the overall always sums every plug, shown or not
             total = total_series([points for _, points, _ in plugs], interval)
-            lines.append(Line("Overall", [t for t, _ in total], [w for _, w in total]))
+            keyed_lines.append((OVERALL, Line("Overall", [t for t, _ in total], [w for _, w in total])))
         for ip, points, estimates in plugs:
-            if self._toggles.shown(ip):
-                times, watts = [t for t, _ in points], [w for _, w in points]
-                lines.append(Line(self._devices[ip].alias, times, watts, self._colors(ip), estimates))
-        title = f"{self._window.currentText()} · average watts" if hours else "Live watts"
-        if not self._devices:
-            title = "No plugs yet"
-        self._chart.show_lines(lines, title, span, interval)
+            times, watts = [t for t, _ in points], [w for _, w in points]
+            keyed_lines.append((ip, Line(self._devices[ip].alias, times, watts, self._colors(ip), estimates)))
+        return keyed_lines

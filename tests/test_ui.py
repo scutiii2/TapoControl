@@ -10,7 +10,7 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 import keyring
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QFontDatabase
 from PySide6.QtWidgets import QApplication
 
 from core.controller import AuthError, EnergySummary, UsageSummary
@@ -85,7 +85,12 @@ class FakeRunner:
 
 @pytest.fixture(scope="module")
 def app():
-    return QApplication.instance() or QApplication([])
+    application = QApplication.instance() or QApplication([])
+    font_dir = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+    for font_file in ("segoeui.ttf", "segoeuib.ttf", "seguisb.ttf"):
+        if (font_dir / font_file).exists():
+            QFontDatabase.addApplicationFont(str(font_dir / font_file))
+    return application
 
 
 @pytest.fixture
@@ -487,6 +492,156 @@ def test_side_tabs_switch_pages_and_report_changes(app):
     assert not tabs._buttons[0].icon().isNull() and tabs.kind(1) == "settings"
 
 
+def test_sidebar_collapse_preserves_page_and_keyboard_labels(app):
+    from PySide6.QtWidgets import QLabel
+
+    from ui.side_tabs import SideTabs
+
+    tabs = SideTabs()
+    tabs.addTab(QLabel("overview"), "overview", "Overview")
+    settings = QLabel("settings")
+    tabs.addTab(settings, "settings", "Settings", bottom=True)
+    tabs.setCurrentWidget(settings)
+    tabs.show()
+    app.processEvents()
+    assert tabs._rail.width() == 212
+    assert tabs._buttons[0].text() == "Overview"
+    tabs.collapse_button.click()
+    app.processEvents()
+    assert tabs._rail.width() == 76
+    assert tabs.currentWidget() is settings
+    assert tabs._buttons[0].toolTip() == "Overview (Ctrl+1)"
+    assert tabs._buttons[0].accessibleName() == "Overview"
+    tabs._buttons[0].click()
+    assert tabs.currentIndex() == 0
+    tabs.collapse_button.click()
+    assert tabs._rail.width() == 212
+    tabs.hide()
+
+
+def test_overview_controls_target_plug_and_wait_for_confirmation(window):
+    w, runner, controller = window
+    card = w._overview.device_cards["192.168.1.3"]
+    card.toggle.click()
+    assert not card.toggle.isChecked()
+    assert not card.toggle.isEnabled()
+    runner.finish()
+    assert ("power", "192.168.1.3", True) in controller.calls
+    assert not card.toggle.isEnabled()
+    runner.finish()
+    assert card.toggle.isChecked() and card.toggle.isEnabled()
+
+
+def test_overview_partial_energy_is_marked_and_offline_card_stays_unknown(window):
+    w, _, _ = window
+    w._energy = {"192.168.1.2": EnergySummary(1000, 5000)}
+    w._state.pop("192.168.1.3")
+    w._render()
+    assert "1 of 2" in w._overview._today_cost.text()
+    assert "partial" in w._overview._today_cost.text().lower()
+    offline = w._overview.device_cards["192.168.1.3"]
+    assert not offline.toggle.isEnabled()
+    assert offline._watts.text() == "—"
+    assert offline.today.text() == "— kWh today"
+
+
+def test_overview_does_not_report_zero_when_no_plugs_answer(window):
+    w, _, _ = window
+    w._state.clear()
+    w._render()
+    assert w._overview._now.text() == "—"
+    assert "Waiting" in w._overview._now_cost.text()
+
+
+def test_overview_collapsed_sidebar_reflows_cards_without_replacing_them(window, app):
+    w, _, _ = window
+    w.show()
+    w.resize(1440, 1060)
+    app.processEvents()
+    before = w._overview.device_cards["192.168.1.3"]
+    w._tabs.collapse_button.click()
+    w.resize(760, 640)
+    app.processEvents()
+    assert w._overview.device_cards["192.168.1.3"] is before
+    assert before.toggle.geometry().right() < before.width()
+    assert w._overview._grid.columns <= 2
+
+
+def test_overview_long_alias_and_many_plugs_remain_scrollable(window, app):
+    w, _, _ = window
+    first = "192.168.1.2"
+    long_name = "Workstation " * 40
+    w._devices[first] = DeviceInfo(first, long_name, "P110")
+    for n in range(4, 15):
+        ip = f"192.0.2.{n}"
+        w._devices[ip] = DeviceInfo(ip, f"Plug {n}", "P110")
+        w._state[ip] = (False, 0.0)
+    w._render()
+    w.show()
+    w.resize(760, 640)
+    for _ in range(3):
+        app.processEvents()
+    card = w._overview.device_cards[first]
+    assert card._name.toolTip() == long_name
+    assert card.toggle.geometry().right() < card.width()
+    scroll = w._overview.verticalScrollBar()
+    assert scroll.maximum() > 0
+    scroll.setValue(scroll.maximum())
+    app.processEvents()
+    last = w._overview.device_cards["192.0.2.14"]
+    assert w._overview.viewport().rect().contains(last.mapTo(w._overview.viewport(), last.rect().center()))
+
+
+def test_live_chart_scaling_preserves_detail_at_typical_plug_load(app):
+    from ui.charts import LiveChart
+
+    chart = LiveChart(120)
+    chart.show_samples([182.4, 225.2], "Live watts")
+    assert chart._y.min() == 0
+    assert chart._y.max() == 300
+    assert chart._y.tickCount() == 4
+
+
+def test_overview_live_window_is_independent_of_devices_history(window):
+    w, _, _ = window
+    w._window.setCurrentIndex(1)
+    assert w._chart._span == 3600
+    assert w._overview._chart._span == 600
+    assert w._overview._range.text() == "Last 10 minutes"
+
+
+def test_overview_keeps_confirmed_zero_watt_readings(window):
+    from collections import deque
+
+    w, _, _ = window
+    ip = "192.168.1.2"
+    w._state[ip] = (True, 0.0)
+    w._samples[ip] = deque([0.0])
+    w._times[ip] = deque([time.time()])
+    w._render()
+    assert w._overview._chart._names == ["Desk"]
+    assert w._overview._chart._points[0][-1][1] == 0.0
+
+
+def test_long_chart_legend_elides_and_retains_accessible_name(app):
+    from ui.charts import LineColors, LineToggles
+
+    label = "Very long workstation alias " * 8
+    toggles = LineToggles(LineColors(), include_overall=False)
+    toggles.set_plugs([("plug", label)])
+    toggles.resize(240, 40)
+    toggles.show()
+    app.processEvents()
+    box = toggles._boxes["plug"]
+    assert box.geometry().right() < toggles.width()
+    assert box.text() != label
+    assert box.toolTip() == label
+    assert box.accessibleName() == label
+    box.click()
+    assert not toggles.shown("plug")
+    toggles.hide()
+
+
 def test_overview_shows_totals_and_fetches_once_a_minute(window):
     w, runner, controller = window
     assert w._tabs.currentWidget() is w._overview
@@ -494,11 +649,11 @@ def test_overview_shows_totals_and_fetches_once_a_minute(window):
     runner.finish()
     assert w._overview._today.text() == "0.84 kWh"  # both plugs added up
     assert w._overview._now.text() == "69.6 W"  # the fake snapshot gives 34.8 W per plug
-    assert w._overview._plugs.text() == "2 of 2"
-    assert [line.name for line in w._overview._chart._lines] == ["Overall", "Desk", "Lamp"]
-    assert w._overview._chart._lines[0].wh == [10, 0, 14]  # fake hours [5, 0, 7] per plug, summed
+    assert w._overview._plugs.text() == "2 / 2"
+    assert w._overview._chart._names == ["Desk", "Lamp"]
+    assert w._overview._chart._points[0][-1][1] == 34.8  # live watts, not hourly energy
     w._toggles._boxes["overall"].setChecked(False)  # the Devices toggles are separate
-    assert [line.name for line in w._overview._chart._lines][0] == "Overall"
+    assert w._overview._chart._names == ["Desk", "Lamp"]
     controller.calls.clear()
     w.refresh()
     runner.finish()
@@ -552,5 +707,9 @@ def test_toggle_swatches_follow_the_theme(app):
     seen = []
     for scheme in (Qt.ColorScheme.Dark, Qt.ColorScheme.Light):
         theme().apply(scheme)
-        seen.append(toggles._boxes["overall"].icon().pixmap(12, 12).toImage().pixelColor(6, 6).name())
+        box = toggles._boxes["overall"]
+        box.resize(box.sizeHint())
+        box.show()
+        app.processEvents()
+        seen.append(box.grab().toImage().pixelColor(3, box.height() // 2).name())
     assert seen == [DARK.text, LIGHT.text]  # the overall wears the text color on each theme

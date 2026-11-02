@@ -1,10 +1,12 @@
 """A left rail of icon buttons beside a stack of pages: a QTabWidget stand-in with the same calls."""
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QPolygonF, QShortcut
-from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QStackedWidget, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QButtonGroup, QFrame, QHBoxLayout, QLabel, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
+)
 
 from ui import tokens as t
-from ui.theme import theme
+from ui.theme import power_icon, theme
 
 ICON_SIZES = (24, 32, 48)
 
@@ -27,6 +29,29 @@ def _paint_icon(painter: QPainter, kind: str, color: QColor) -> None:
     elif kind == "account":
         painter.drawEllipse(QPointF(12, 8), 4, 4)
         painter.drawArc(QRectF(4, 14, 16, 14), 0, 180 * 16)
+    elif kind == "sidebar":
+        painter.drawRoundedRect(QRectF(3, 4, 18, 16), 3, 3)
+        painter.drawLine(QPointF(9, 4), QPointF(9, 20))
+    elif kind == "monitor":
+        painter.drawRoundedRect(QRectF(3, 4, 18, 13), 2, 2)
+        painter.drawLine(QPointF(8, 21), QPointF(16, 21))
+        painter.drawLine(QPointF(12, 17), QPointF(12, 21))
+    elif kind == "lamp":
+        painter.drawPolygon(QPolygonF([QPointF(8, 3), QPointF(4, 15), QPointF(20, 15), QPointF(16, 3)]))
+        painter.drawLine(QPointF(12, 15), QPointF(12, 21))
+        painter.drawLine(QPointF(7, 21), QPointF(17, 21))
+    elif kind == "coffee":
+        painter.drawRoundedRect(QRectF(4, 7, 13, 12), 4, 4)
+        painter.drawArc(QRectF(14, 8, 8, 7), -90 * 16, 180 * 16)
+        painter.drawLine(QPointF(3, 22), QPointF(19, 22))
+    elif kind == "fan":
+        painter.drawEllipse(QPointF(12, 12), 2, 2)
+        for angle in (0, 120, 240):
+            painter.save()
+            painter.translate(12, 12)
+            painter.rotate(angle)
+            painter.drawEllipse(QRectF(-2, -10, 5, 8))
+            painter.restore()
     else:  # settings: three sliders
         painter.setBrush(color)
         for y, knob in ((6, 8), (12, 16), (18, 10)):
@@ -54,18 +79,51 @@ class SideTabs(QWidget):
     """Pages chosen from an icon rail on the left. `content` is the column above the pages, for a shared header."""
 
     currentChanged = Signal(int)
+    collapsedChanged = Signal(bool)
 
     def __init__(self):
         super().__init__()
         self._rail = QFrame()
         self._rail.setObjectName("Rail")
-        self._rail.setFixedWidth(48 + 2 * t.SP_LG + 1)  # a button, a margin each side and the border
+        self._collapsed = False
+        self._rail.setFixedWidth(t.SIDEBAR_EXPANDED)
         self._rail_layout = QVBoxLayout(self._rail)
-        self._rail_layout.setContentsMargins(t.SP_LG, t.SP_LG, t.SP_LG, t.SP_LG)
-        self._rail_layout.setSpacing(t.SP_SM)
+        self._rail_layout.setContentsMargins(t.METRIC_PAD, t.PAGE_Y, t.METRIC_PAD, t.PAGE_BOTTOM)
+        self._rail_layout.setSpacing(t.SP_XS)
+        brand = QHBoxLayout()
+        brand.setSpacing(t.SP_MD)
+        self._brand_icon = QLabel()
+        self._brand_icon.setFixedSize(35, 35)
+        self._brand = QLabel("TapoControl")
+        self._brand.setProperty("role", "brand")
+        brand.addWidget(self._brand_icon)
+        brand.addWidget(self._brand, 1)
+        self._rail_layout.addLayout(brand)
+        self._rail_layout.addSpacing(t.PAGE_X)
+        self._workspace = QLabel("WORKSPACE")
+        self._workspace.setProperty("role", "eyebrow")
+        self._workspace.setContentsMargins(t.SP_MD, 0, 0, t.SP_SM)
+        self._rail_layout.addWidget(self._workspace)
+        self._network = QFrame()
+        self._network.setObjectName("Network")
+        network_layout = QVBoxLayout(self._network)
+        network_layout.setContentsMargins(t.SP_MD, t.SP_LG, t.SP_MD, t.SP_LG)
+        network_layout.setSpacing(t.SP_SM)
+        network_label = QLabel("●  Local network")
+        network_label.setProperty("role", "small")
+        self._network_status = QLabel("No plugs connected")
+        self._network_status.setProperty("role", "caption")
+        network_layout.addWidget(network_label)
+        network_layout.addWidget(self._network_status)
+        self.collapse_button = QToolButton()
+        self.collapse_button.setProperty("quiet", True)
+        self.collapse_button.setFixedSize(32, 32)
+        self.collapse_button.setIconSize(QSize(19, 19))
+        self.collapse_button.clicked.connect(lambda: self.set_collapsed(not self._collapsed))
         self._stack = QStackedWidget()
         self._buttons: list[QToolButton] = []
         self._kinds: list[str] = []
+        self._labels: list[str] = []
         self._bottom = False
         self._group = QButtonGroup(self)
         self._group.idClicked.connect(self.setCurrentIndex)
@@ -78,6 +136,8 @@ class SideTabs(QWidget):
         row.addWidget(self._rail)
         row.addLayout(self.content, 1)
         theme().changed.connect(self._apply_theme)
+        self._apply_theme()
+        self.set_collapsed(False)
 
     def addTab(self, page: QWidget, kind: str, label: str, bottom: bool = False) -> int:
         """`kind` picks the icon; `bottom` puts this and the following buttons at the foot of the rail."""
@@ -88,24 +148,58 @@ class SideTabs(QWidget):
         button.setToolTip(f"{label} (Ctrl+{index + 1})")
         button.setAccessibleName(label)
         QShortcut(QKeySequence(f"Ctrl+{index + 1}"), self, activated=lambda: self.setCurrentIndex(index))
-        button.setFixedSize(48, 48)
+        button.setText(label)
+        button.setFixedHeight(44)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         button.setFocusPolicy(Qt.FocusPolicy.TabFocus)  # a keyboard ring, never a leftover from a mouse click
-        button.setIconSize(QSize(26, 26))
+        button.setIconSize(QSize(18, 18))
         self._group.addButton(button, index)
         if bottom and not self._bottom:
             self._rail_layout.addStretch(1)
+            self._rail_layout.addWidget(self._network)
+            self._rail_layout.addSpacing(t.SP_SM)
             self._bottom = True
-        self._rail_layout.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
+        self._rail_layout.addWidget(button)
         self._buttons.append(button)
         self._kinds.append(kind)
+        self._labels.append(label)
         button.setChecked(index == 0)
         self._apply_theme()
+        self.set_collapsed(self._collapsed)
         return index
 
     def _apply_theme(self) -> None:
         colors = theme().colors
+        self._brand_icon.setPixmap(power_icon(colors.accent).pixmap(35, 35))
+        self.collapse_button.setIcon(nav_icon("sidebar", colors.muted, colors.accent))
         for button, kind in zip(self._buttons, self._kinds, strict=True):
             button.setIcon(nav_icon(kind, colors.muted, colors.accent))
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        """Resize only navigation; page objects and in-flight operations remain intact."""
+        changed = self._collapsed != collapsed
+        self._collapsed = collapsed
+        self._rail.setFixedWidth(t.SIDEBAR_COLLAPSED if collapsed else t.SIDEBAR_EXPANDED)
+        self._brand.setVisible(not collapsed)
+        self._workspace.setVisible(not collapsed)
+        self._network.setVisible(not collapsed and self._bottom)
+        margin = t.SP_MD if collapsed else t.METRIC_PAD
+        self._rail_layout.setContentsMargins(margin, t.PAGE_Y, margin, t.PAGE_BOTTOM)
+        for button in self._buttons:
+            button.setFixedWidth(48 if collapsed else t.SIDEBAR_EXPANDED - 2 * t.METRIC_PAD)
+            button.setToolButtonStyle(
+                Qt.ToolButtonStyle.ToolButtonIconOnly if collapsed else Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+            )
+            button.setStyleSheet("padding-left: 0;" if collapsed else "padding-left: 12px;")
+        label = "Expand sidebar" if collapsed else "Collapse sidebar"
+        self.collapse_button.setToolTip(label)
+        self.collapse_button.setAccessibleName(label)
+        self.collapse_button.setAccessibleDescription("Sidebar collapsed" if collapsed else "Sidebar expanded")
+        if changed:
+            self.collapsedChanged.emit(collapsed)
+
+    def show_connection_count(self, online: int) -> None:
+        self._network_status.setText(f"{online} plug{'s' if online != 1 else ''} connected")
 
     def setCurrentIndex(self, index: int) -> None:
         if index == self._stack.currentIndex():
