@@ -10,10 +10,10 @@ Enter your Tapo app email and password when asked. The email and known plugs go 
 
 ## Develop
 ```
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-.venv\Scripts\python.exe run.py
-.venv\Scripts\python.exe -m pytest
+python -m pip install uv
+uv sync
+uv run run.py
+uv run pytest
 ```
 
 ## Build the installer

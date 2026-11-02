@@ -7,9 +7,8 @@ $Root = Split-Path $PSScriptRoot
 Set-Location -LiteralPath $Root
 $Py = Join-Path $Root ".venv\Scripts\python.exe"
 
-if (-not (Test-Path $Py)) { & python -m venv .venv; if ($LASTEXITCODE) { throw "venv failed" } }
-& $Py -m pip install --disable-pip-version-check -q -r requirements.txt
-if ($LASTEXITCODE) { throw "pip install failed" }
+& python -m uv sync --frozen
+if ($LASTEXITCODE) { throw "uv sync failed (install uv: python -m pip install uv)" }
 if (-not $SkipTests) { & $Py -m pytest -q; if ($LASTEXITCODE) { throw "tests failed" } }
 & $Py -m PyInstaller packaging/build.spec --noconfirm
 if ($LASTEXITCODE) { throw "PyInstaller failed" }
