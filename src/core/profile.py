@@ -3,6 +3,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 
 SLOT_SECONDS = 300
+MIN_FILL_SECONDS = 30  # shorter gaps are just a missed poll; leave the straight line
 MIN_READINGS = 12  # about a minute of 5-second readings before a slot counts as known
 
 Key = tuple[int, int]  # (is_weekend, slot of the day)
@@ -32,15 +33,16 @@ def fill_gaps(
     """
     estimates: list[tuple[float, float]] = []
     for (t0, w0), (t1, w1) in zip(points, points[1:]):
-        if t1 - t0 <= gap_seconds or any(t0 < t < t1 for t, _ in plug):
+        if t1 - t0 <= max(gap_seconds, MIN_FILL_SECONDS) or any(t0 < t < t1 for t, _ in plug):
             continue
         shift0 = w0 - (_typical(profile, t0) or w0)
         shift1 = w1 - (_typical(profile, t1) or w1)
-        t = t0 + SLOT_SECONDS
-        while t < t1 - SLOT_SECONDS / 2:
+        step = min(SLOT_SECONDS, (t1 - t0) / 2)  # at least a midpoint, even in a short gap
+        t = t0 + step
+        while t < t1 - step / 2:
             base = _typical(profile, t)
             if base is not None:
                 shift = shift0 + (shift1 - shift0) * (t - t0) / (t1 - t0)
                 estimates.append((t, max(0.0, base + shift)))
-            t += SLOT_SECONDS
+            t += step
     return estimates

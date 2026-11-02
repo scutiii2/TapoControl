@@ -35,3 +35,9 @@ def test_no_estimates_without_profile_or_when_plug_covers_gap_or_gap_is_short():
 def test_estimates_never_go_negative():
     estimates = fill_gaps([(MON, 0.0), (MON + 3600, 0.0)], [], flat_profile(MON, 100.0), 12.5)
     assert estimates and min(w for _, w in estimates) >= 0
+
+
+def test_short_gap_gets_a_midpoint():
+    estimates = fill_gaps([(MON, 70.0), (MON + 300, 50.0)], [], flat_profile(MON, 60.0), 12.5)
+    assert [t for t, _ in estimates] == [MON + 150]
+    assert 55 < estimates[0][1] < 65  # between the two edge readings' shifts
