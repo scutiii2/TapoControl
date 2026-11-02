@@ -3,12 +3,11 @@ import time
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
 
-from PySide6.QtCharts import QBarCategoryAxis, QBarSeries, QBarSet, QChart, QChartView, QLineSeries, QValueAxis
-from PySide6.QtCore import QMargins, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QToolTip
+from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
+from PySide6.QtCore import QMargins, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QWidget
 
 from ui.theme import theme
 
@@ -48,6 +47,110 @@ def style_chart(view: QChartView) -> None:
         axis.setTitleFont(QFont("Segoe UI", 9))
         axis.setLineVisible(False)
         axis.setGridLinePen(QPen(QColor(colors.border), 0.5))
+
+
+OVERALL = "overall"  # toggle key for the sum of all plugs
+# One per plug, in order; the overall wears the theme accent.
+LINE_COLORS = ("#4c9aff", "#ff8a3d", "#3ddc97", "#e86ac9", "#f5c542", "#9b7bff", "#35c4d8", "#ff6b6b")
+
+
+class LineColors:
+    """A plug keeps its color whatever the filter, so toggling never repaints the others."""
+
+    def __init__(self) -> None:
+        self._colors: dict[str, str] = {}
+
+    def __call__(self, key: str) -> str:
+        if key not in self._colors:
+            self._colors[key] = LINE_COLORS[len(self._colors) % len(LINE_COLORS)]
+        return self._colors[key]
+
+
+def swatch(color: str) -> QIcon:
+    pixmap = QPixmap(12, 12)
+    pixmap.fill(QColor(color))
+    return QIcon(pixmap)
+
+
+class LineToggles(QWidget):
+    """A checkbox for the overall line and one per plug; hidden keys stay hidden when the boxes are rebuilt."""
+
+    changed = Signal()
+
+    def __init__(self, colors: LineColors):
+        super().__init__()
+        self._colors = colors
+        self._boxes: dict[str, QCheckBox] = {}
+        self._signature: tuple = ()
+        self.hidden: set[str] = set()
+        self._row = QHBoxLayout(self)
+        self._row.setContentsMargins(0, 0, 0, 0)
+        self._row.setSpacing(14)
+
+    def shown(self, key: str) -> bool:
+        return key not in self.hidden
+
+    def set_plugs(self, names: Sequence[tuple[str, str]]) -> None:
+        """`names` are (ip, label); the boxes are rebuilt only when the plugs, labels or theme change."""
+        accent = theme().colors.accent
+        signature = (accent, *names)
+        if signature == self._signature:
+            return
+        self._signature = signature
+        while self._row.count():
+            item = self._row.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._boxes = {}
+        if names:
+            self._add(OVERALL, "Overall", accent)
+        for key, label in names:
+            self._add(key, label, self._colors(key))
+        self._row.addStretch(1)
+
+    def _add(self, key: str, label: str, color: str) -> None:
+        box = QCheckBox(label)
+        box.setIcon(swatch(color))
+        box.setChecked(self.shown(key))
+        box.toggled.connect(lambda on, key=key: self._toggled(key, on))
+        self._row.addWidget(box)
+        self._boxes[key] = box
+
+    def _toggled(self, key: str, on: bool) -> None:
+        self.hidden.discard(key) if on else self.hidden.add(key)
+        self.changed.emit()
+
+
+def paint_readout(
+    painter: QPainter, area: QRectF, x: float, head: str,
+    dots: Sequence[tuple[QPointF, str]], entries: Sequence[tuple[str, str]],
+) -> None:
+    """Hover layer: a crosshair at `x`, a dot per line and a box with `head` over the (color, text) `entries`."""
+    c = theme().colors
+    painter.setPen(QPen(QColor(c.control), 1))
+    painter.drawLine(QPointF(x, area.top()), QPointF(x, area.bottom()))
+    for point, color in dots:
+        painter.setPen(QPen(QColor(c.surface), 2))
+        painter.setBrush(QColor(color))
+        painter.drawEllipse(point, 4.5, 4.5)
+    metrics = painter.fontMetrics()
+    width = max(metrics.horizontalAdvance(t) for t in [head, *(t for _, t in entries)]) + 34
+    box = QRectF(0, 0, width, 12 + 18 * (len(entries) + 1))
+    edge = x + 10 if x + 10 + box.width() <= area.right() else x - 10 - box.width()
+    box.moveTopLeft(QPointF(max(area.left(), edge), area.top() + 4))
+    painter.setPen(QPen(QColor(c.border), 1))
+    painter.setBrush(QColor(c.raised))
+    painter.drawRoundedRect(box, 6, 6)
+    middle = Qt.AlignmentFlag.AlignVCenter
+    painter.setPen(QColor(c.muted))
+    painter.drawText(QRectF(box.left() + 10, box.top() + 6, width - 20, 18), middle, head)
+    for n, (color, text) in enumerate(entries, 1):
+        top = box.top() + 6 + 18 * n
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color))
+        painter.drawEllipse(QPointF(box.left() + 14, top + 9), 4, 4)
+        painter.setPen(QColor(c.text))
+        painter.drawText(QRectF(box.left() + 24, top, width - 30, 18), middle, text)
 
 
 @dataclass
@@ -225,36 +328,13 @@ class LiveChart(QChartView):
         rows = self._rows_at(self._hover) if self._hover is not None else []
         if rows:
             x = area.left() + self._hover / self._max * area.width()
-            painter.setPen(QPen(QColor(c.control), 1))
-            painter.drawLine(QPointF(x, area.top()), QPointF(x, area.bottom()))
+            dots = []
             for i, slot, value in rows:
-                color = QColor(self._color_of(i))
-                dot_x = area.left() + slot / self._max * area.width()
                 y = area.bottom() - value / (self._y.max() or 1) * area.height()
-                painter.setPen(QPen(QColor(c.surface), 2))
-                painter.setBrush(color)
-                painter.drawEllipse(QPointF(dot_x, y), 4.5, 4.5)
+                dots.append((QPointF(area.left() + slot / self._max * area.width(), y), self._color_of(i)))
+            entries = [(self._color_of(i), f"{self._names[i]}  {value:.1f} W".strip()) for i, _, value in rows]
             ago = round((self._max - self._hover) / self._max * self._span)
-            texts = [(self._color_of(i), f"{self._names[i]}  {value:.1f} W".strip()) for i, _, value in rows]
-            metrics = painter.fontMetrics()
-            head = age_text(ago)
-            width = max(metrics.horizontalAdvance(t) for t in [head, *(t for _, t in texts)]) + 34
-            box = QRectF(0, 0, width, 12 + 18 * (len(texts) + 1))
-            left_edge = x + 10 if x + 10 + box.width() <= area.right() else x - 10 - box.width()
-            box.moveTopLeft(QPointF(max(area.left(), left_edge), area.top() + 4))
-            painter.setPen(QPen(QColor(c.border), 1))
-            painter.setBrush(QColor(c.raised))
-            painter.drawRoundedRect(box, 6, 6)
-            painter.setPen(QColor(c.muted))
-            middle = Qt.AlignmentFlag.AlignVCenter
-            painter.drawText(QRectF(box.left() + 10, box.top() + 6, width - 20, 18), middle, head)
-            for n, (color, text) in enumerate(texts, 1):
-                top = box.top() + 6 + 18 * n
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(color))
-                painter.drawEllipse(QPointF(box.left() + 14, top + 9), 4, 4)
-                painter.setPen(QColor(c.text))
-                painter.drawText(QRectF(box.left() + 24, top, width - 30, 18), middle, text)
+            paint_readout(painter, area, x, age_text(ago), dots, entries)
         painter.restore()
 
     def _color_of(self, index: int) -> str:
@@ -262,25 +342,33 @@ class LiveChart(QChartView):
         return self._colors[index] or theme().colors.accent
 
 
-class DailyBars(QChartView):
-    """kWh per day."""
+@dataclass
+class UsageLine:
+    """One line of the usage chart: Wh per key, None where the plug has no point. `color` None is the accent."""
+
+    name: str
+    color: str | None
+    wh: Sequence[int | None]
+
+
+class UsageChart(QChartView):
+    """kWh per day, month or hour: one line per plug plus the overall."""
+
+    TITLES = {"day": "Daily usage", "month": "Monthly usage", "hour": "Usage today by hour"}
 
     def __init__(self):
         super().__init__(QChart())
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.chart().legend().hide()
-        self.chart().setTitle("Daily usage")
         self.chart().setMargins(QMargins(8, 4, 16, 30))
         self.setMinimumHeight(250)
-        self._rows: list[tuple[date, int]] = []
+        self.setMouseTracking(True)
+        self._keys: list = []  # a date, or an hour number for the hourly view
         self._kind = "day"
-        self._bars = QBarSet("kWh")
-        self._bars.hovered.connect(self._on_hover)
-        series = QBarSeries()
-        series.append(self._bars)
-        series.setBarWidth(0.6)
-        self.chart().addSeries(series)
-        self._x = QBarCategoryAxis()
+        self._lines: list[UsageLine] = []
+        self._series: list[QLineSeries] = []
+        self._hover: int | None = None
+        self._x = QValueAxis()
         self._x.setVisible(False)
         self._y = QValueAxis()
         self._y.setTitleText("kWh")
@@ -288,20 +376,10 @@ class DailyBars(QChartView):
         self._y.setLabelFormat("%.2f")
         self.chart().addAxis(self._x, BOTTOM)
         self.chart().addAxis(self._y, LEFT)
-        series.attachAxis(self._x)
-        series.attachAxis(self._y)
         theme().changed.connect(self._apply_theme)
-        self.show_rows([])
-
-    def _on_hover(self, hovering: bool, index: int) -> None:
-        if hovering and index < len(self._rows):
-            key, wh = self._rows[index]
-            QToolTip.showText(QCursor.pos(), f"{self._label(key, tooltip=True)} · {wh / 1000:.2f} kWh", self)
-        else:
-            QToolTip.hideText()
+        self.show_lines([], [], "day")
 
     def _label(self, key, tooltip: bool = False) -> str:
-        """`key` is a date, or an hour number for the hourly view."""
         if self._kind == "hour":
             return f"{key:02d}:00"
         if self._kind == "month":
@@ -310,31 +388,54 @@ class DailyBars(QChartView):
 
     def _apply_theme(self) -> None:
         style_chart(self)
-        self._bars.setColor(QColor(theme().colors.accent))
-        self._bars.setBorderColor(QColor(theme().colors.accent))
+        accent = theme().colors.accent
+        for series, line in zip(self._series, self._lines, strict=True):
+            series.setPen(QPen(QColor(line.color or accent), 2.5 if line.color is None else 2))
         self.viewport().update()
 
-    def show_rows(self, rows: list[tuple[date | int, int]], kind: str = "day") -> None:
-        """kind: "day" / "month" rows are (date, Wh); "hour" rows are (hour, Wh)."""
-        self._rows = list(rows)
-        self._kind = kind
-        self.chart().setTitle({"day": "Daily usage", "month": "Monthly usage", "hour": "Usage today by hour"}[kind])
-        if self._bars.count():
-            self._bars.remove(0, self._bars.count())
-        self._x.clear()
-        if rows:
-            self._bars.append([wh / 1000 for _, wh in rows])
-            self._x.append([str(k) for k, _ in rows])
-        self._y.setRange(0, max((wh for _, wh in rows), default=0) / 1000 * 1.2 or 1)
+    def show_lines(self, lines: Sequence[UsageLine], keys: Sequence, kind: str = "day") -> None:
+        """`kind` is "day" / "month" (keys are dates) or "hour" (keys are hours); each line has a value per key."""
+        self._lines, self._keys, self._kind, self._hover = list(lines), list(keys), kind, None
+        self.chart().setTitle(self.TITLES[kind])
+        for series in self._series:
+            self.chart().removeSeries(series)
+        self._series = []
+        for line in self._lines:
+            series = QLineSeries()
+            series.append([QPointF(i, wh / 1000) for i, wh in enumerate(line.wh) if wh is not None])
+            series.setPointsVisible(len(self._keys) <= 40)
+            self.chart().addSeries(series)
+            series.attachAxis(self._x)
+            series.attachAxis(self._y)
+            self._series.append(series)
+        self._x.setRange(-0.5, max(len(self._keys), 1) - 0.5)
+        peak = max((wh for line in self._lines for wh in line.wh if wh is not None), default=0)
+        self._y.setRange(0, peak / 1000 * 1.2 or 1)
         self._apply_theme()
+
+    def _index_at(self, x: float) -> int | None:
+        area = self.chart().mapRectToScene(self.chart().plotArea())
+        if not self._keys or not area.left() <= x <= area.right():
+            return None
+        return min(len(self._keys) - 1, int((x - area.left()) / area.width() * len(self._keys)))
+
+    def mouseMoveEvent(self, event) -> None:
+        super().mouseMoveEvent(event)
+        self._hover = self._index_at(self.mapToScene(event.position().toPoint()).x())
+        self.viewport().update()
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        self._hover = None
+        self.viewport().update()
 
     def drawForeground(self, painter: QPainter, rect: QRectF) -> None:
         super().drawForeground(painter, rect)
-        if not self._rows:
+        if not self._keys:
             return
         # Paint sparse date labels so a whole quarter remains readable at small widths.
         area = self.chart().mapRectToScene(self.chart().plotArea())
-        count = len(self._rows)
+        count = len(self._keys)
         ticks = min(count, max(2, int(area.width() / 100)))
         indices = sorted({round(i * (count - 1) / max(1, ticks - 1)) for i in range(ticks)})
         painter.save()
@@ -342,6 +443,18 @@ class DailyBars(QChartView):
         painter.setFont(QFont("Segoe UI", 9))
         for index in indices:
             x = area.left() + (index + 0.5) * area.width() / count
-            label = self._label(self._rows[index][0])
+            label = self._label(self._keys[index])
             painter.drawText(QRectF(x - 36, area.bottom() + 8, 72, 22), Qt.AlignmentFlag.AlignCenter, label)
+        if self._hover is not None:
+            accent = theme().colors.accent
+            x = area.left() + (self._hover + 0.5) * area.width() / count
+            dots, entries = [], []
+            for line in self._lines:
+                wh = line.wh[self._hover]
+                if wh is not None:
+                    y = area.bottom() - wh / 1000 / (self._y.max() or 1) * area.height()
+                    dots.append((QPointF(x, y), line.color or accent))
+                    entries.append((line.color or accent, f"{line.name}  {wh / 1000:.2f} kWh"))
+            if entries:
+                paint_readout(painter, area, x, self._label(self._keys[self._hover], tooltip=True), dots, entries)
         painter.restore()

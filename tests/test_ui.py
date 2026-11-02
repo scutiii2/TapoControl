@@ -209,7 +209,7 @@ def test_new_account_ignores_old_energy_and_snapshot_auth_errors(window, monkeyp
     old_snapshot(None, AuthError("old account"))
     assert not w._auth_required
     assert w._timer.isActive()
-    assert w._history._ip is None
+    assert not w._history._names
 
 
 def test_other_snapshot_does_not_enable_switch_before_confirmation(window):
@@ -246,13 +246,13 @@ def test_snapshot_started_before_toggle_cannot_confirm_power(window):
 def test_energy_rejects_old_selection_callbacks_and_preserves_raw_error(window):
     w, runner, controller = window
     panel = w._history
-    panel.load(controller, "192.168.1.2", "Desk")
+    panel.load(controller, {"192.168.1.2": "Desk"})
     old_callback = runner.pending[0][1]
-    panel.load(controller, "192.168.1.3", "Lamp")
+    panel.load(controller, {"192.168.1.3": "Lamp"})
     runner.finish()
     old_callback(EnergySummary(999999, 999999), None)
     assert panel._today.text() == "0.42 kWh"
-    panel._on_summary(None, TimeoutError("exact low-level message"))
+    panel._on_summary("192.168.1.3", None, TimeoutError("exact low-level message"))
     assert "timed out" in panel._summary_error.text()
     assert panel._summary_error.toolTip() == "exact low-level message"
 
@@ -267,7 +267,7 @@ def test_tab_energy_actions_and_live_theme_changes(window):
     for scheme in (Qt.ColorScheme.Dark, Qt.ColorScheme.Light):
         theme().apply(scheme)
         assert w._chart._lines[0].pen().color().name() == theme().colors.accent
-        assert w._history._bars._bars.color().name() == theme().colors.accent
+        assert w._history._chart._series[0].pen().color().name() == theme().colors.accent
 
 
 def test_card_rename_and_all_power_keep_existing_actions(window, monkeypatch):
@@ -297,20 +297,21 @@ def test_close_hides_to_tray_and_show_restores(window, app):
 def test_energy_history_is_stored_and_range_switches_to_monthly(window):
     w, runner, controller = window
     panel = w._history
-    panel.load(controller, "192.168.1.2", "Desk")
+    panel.load(controller, {"192.168.1.2": "Desk"})
     runner.finish()
     assert not w._store.backfilled("192.168.1.2")  # current quarter shows first
     runner.finish()  # then the one-off backfill of older quarters
     assert w._store.backfilled("192.168.1.2")
     assert w._store.daily("192.168.1.2") == [(date(2026, 11, 1), 420)]
     panel._range.setCurrentIndex(3)
-    assert panel._bars._kind == "month"
+    assert panel._chart._kind == "month"
     panel._range.setCurrentIndex(0)
     runner.finish()
-    assert panel._bars._kind == "hour" and panel._bars._rows == [(0, 5), (1, 0), (2, 7)]
+    assert panel._chart._kind == "hour" and panel._chart._keys == [0, 1, 2]
+    assert panel._chart._lines[0].wh == [5, 0, 7]
     assert "Last 7 days: 0.70 kWh" in panel._usage.text()
-    panel.load(controller, "192.168.1.2", "Desk")  # second open: stored rows still shown
-    assert panel._rows == []  # cleared until the plug answers
+    panel.load(controller, {"192.168.1.2": "Desk"})  # second open: stored rows still shown
+    assert panel._rows == {}  # cleared until the plug answers
 
 
 def test_live_chart_breaks_line_over_gap_and_keeps_restored_samples():
@@ -347,15 +348,15 @@ def test_chart_toggles_hide_lines_but_overall_still_sums_every_plug(window):
     w, runner, _ = window
     w._window.setCurrentIndex(1)
     runner.finish()
-    colors = dict(w._line_colors)
+    colors = dict(w._colors._colors)
     assert len(colors) == 2 and len(set(colors.values())) == 2
-    w._set_line_shown("192.168.1.2", False)
+    w._toggles._boxes["192.168.1.2"].setChecked(False)
     assert w._chart._names == ["Overall", "Lamp"]
     assert [v for _, v in w._chart._points[0]] == [60.0, 80.0]
-    assert w._line_colors == colors  # the others keep their colors
-    w._set_line_shown("overall", False)
+    assert w._colors._colors == colors  # the others keep their colors
+    w._toggles._boxes["overall"].setChecked(False)
     assert w._chart._names == ["Lamp"]
-    w._set_line_shown("192.168.1.2", True)
+    w._toggles._boxes["192.168.1.2"].setChecked(True)
     assert w._chart._names == ["Desk", "Lamp"]
 
 
@@ -367,6 +368,32 @@ def test_chart_hover_lists_every_line_at_the_cursor():
     chart.show_lines([Line("A", [now - 5], [1.0]), Line("B", [now - 6], [2.0], "#ff0000")], "x")
     rows = chart._rows_at(chart._slot(now - 5))
     assert [(i, v) for i, _, v in rows] == [(0, 1.0), (1, 2.0)]
+
+
+def test_energy_chart_sums_plugs_and_toggles_lines(window):
+    w, runner, controller = window
+    panel = w._history
+    panel.load(controller, {"192.168.1.2": "Desk", "192.168.1.3": "Lamp"})
+    runner.finish()
+    runner.finish()
+    assert panel._today.text() == "0.84 kWh"  # both plugs added up
+    assert [line.name for line in panel._chart._lines] == ["Overall", "Desk", "Lamp"]
+    assert panel._chart._lines[0].wh == [840]
+    panel._toggles._boxes["192.168.1.2"].setChecked(False)
+    assert [line.name for line in panel._chart._lines] == ["Overall", "Lamp"]
+    assert panel._chart._lines[0].wh == [840]  # the overall still sums the hidden plug
+    assert panel._colors("192.168.1.3") == w._colors("192.168.1.3")  # same color on both tabs
+
+
+def test_energy_follows_renames_and_clears_when_plugs_change(window):
+    w, runner, controller = window
+    panel = w._history
+    panel.load(controller, {"192.168.1.2": "Desk", "192.168.1.3": "Lamp"})
+    runner.finish()
+    assert not panel.set_names({"192.168.1.2": "Desk 2", "192.168.1.3": "Lamp"})
+    assert [line.name for line in panel._chart._lines][1] == "Desk 2"
+    assert panel.set_names({"192.168.1.2": "Desk 2"})
+    assert not panel._names
 
 
 def test_gap_is_dashed_through_plug_estimates():
@@ -411,7 +438,7 @@ def test_csv_export_writes_shown_rows(window, monkeypatch, tmp_path):
 
     w, runner, controller = window
     panel = w._history
-    panel.load(controller, "192.168.1.2", "Desk")
+    panel.load(controller, {"192.168.1.2": "Desk"})
     runner.finish()
     runner.finish()
     target = tmp_path / "out.csv"
