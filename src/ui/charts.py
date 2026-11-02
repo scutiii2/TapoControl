@@ -15,6 +15,16 @@ SAMPLE_SECONDS = 5  # must match the main window's refresh interval
 GAP_SLOTS = 2.5  # further apart than this many sample intervals and the line breaks
 
 
+def age_text(seconds: int) -> str:
+    if seconds <= SAMPLE_SECONDS:
+        return "now"
+    if seconds < 60:
+        return f"{seconds} s ago"
+    if seconds >= 3600:
+        return f"{seconds // 3600} h {seconds % 3600 // 60:02d} min ago"
+    return f"{seconds // 60} min {seconds % 60:02d} s ago"
+
+
 def ago_label(seconds: float) -> str:
     return f"{seconds / 3600:g} h ago" if seconds >= 3600 else f"{seconds / 60:g} min ago"
 BOTTOM = Qt.AlignmentFlag.AlignBottom
@@ -162,7 +172,13 @@ class LiveChart(QChartView):
         painter.save()
         painter.setPen(QColor(c.muted))
         painter.setFont(QFont("Segoe UI", 9))
-        for slot, label, align in ((0, ago_label(self._span), Qt.AlignmentFlag.AlignLeft), (self._max // 2, ago_label(self._span / 2), Qt.AlignmentFlag.AlignHCenter), (self._max, "now", Qt.AlignmentFlag.AlignRight)):
+        left, center, right = (Qt.AlignmentFlag.AlignLeft, Qt.AlignmentFlag.AlignHCenter, Qt.AlignmentFlag.AlignRight)
+        labels = (
+            (0, ago_label(self._span), left),
+            (self._max // 2, ago_label(self._span / 2), center),
+            (self._max, "now", right),
+        )
+        for slot, label, align in labels:
             x = area.left() + slot / self._max * area.width()
             box = QRectF(x - 40, area.bottom() + 6, 80, 18)
             if align == Qt.AlignmentFlag.AlignLeft:
@@ -180,7 +196,7 @@ class LiveChart(QChartView):
             painter.setBrush(QColor(c.accent))
             painter.drawEllipse(QPointF(x, y), 4.5, 4.5)
             ago = round((self._max - slot) / self._max * self._span)
-            text = f"{value:.1f} W · " + ("now" if ago <= SAMPLE_SECONDS else f"{ago} s ago" if ago < 60 else f"{ago // 3600} h {ago % 3600 // 60:02d} min ago" if ago >= 3600 else f"{ago // 60} min {ago % 60:02d} s ago")
+            text = f"{value:.1f} W · {age_text(ago)}"
             box = QRectF(0, 0, painter.fontMetrics().horizontalAdvance(text) + 16, 24)
             box.moveTopLeft(QPointF(min(x + 10, area.right() - box.width()), max(area.top(), y - 34)))
             painter.setPen(QPen(QColor(c.border), 1))

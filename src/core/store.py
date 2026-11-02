@@ -34,12 +34,14 @@ class Store:
             # Separate table so a rescan (which rewrites devices) keeps the user's names.
             "CREATE TABLE IF NOT EXISTS nicknames (ip TEXT PRIMARY KEY, nickname TEXT NOT NULL);"
             # Daily Wh copied off the plug so history outlives what the plug itself keeps.
-            "CREATE TABLE IF NOT EXISTS daily_energy (ip TEXT NOT NULL, day TEXT NOT NULL, wh INTEGER NOT NULL, PRIMARY KEY (ip, day));"
+            "CREATE TABLE IF NOT EXISTS daily_energy "
+            "(ip TEXT NOT NULL, day TEXT NOT NULL, wh INTEGER NOT NULL, PRIMARY KEY (ip, day));"
             # Live watts readings so the live chart survives a restart; pruned to recent days.
             "CREATE TABLE IF NOT EXISTS power_samples (ip TEXT NOT NULL, ts REAL NOT NULL, watts REAL NOT NULL);"
             "CREATE INDEX IF NOT EXISTS power_samples_ip_ts ON power_samples (ip, ts);"
             # Running mean of watts per plug, day type and 5-minute slot: the plug's typical day.
-            "CREATE TABLE IF NOT EXISTS power_profile (ip TEXT NOT NULL, weekend INTEGER NOT NULL, slot INTEGER NOT NULL, "
+            "CREATE TABLE IF NOT EXISTS power_profile "
+            "(ip TEXT NOT NULL, weekend INTEGER NOT NULL, slot INTEGER NOT NULL, "
             "total REAL NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (ip, weekend, slot));"
             "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
         )
@@ -65,7 +67,8 @@ class Store:
                 # Same device at a new IP: its nickname moves with it.
                 if d.device_id in old_ips and old_ips[d.device_id] != d.ip:
                     for table in ("nicknames", "daily_energy", "power_samples", "power_profile"):
-                        self._db.execute(f"UPDATE OR REPLACE {table} SET ip = ? WHERE ip = ?", (d.ip, old_ips[d.device_id]))
+                        old_ip = old_ips[d.device_id]
+                        self._db.execute(f"UPDATE OR REPLACE {table} SET ip = ? WHERE ip = ?", (d.ip, old_ip))
             self._db.execute("DELETE FROM devices")
             self._db.executemany(
                 "INSERT INTO devices (ip, alias, model, device_id) VALUES (?, ?, ?, ?)",

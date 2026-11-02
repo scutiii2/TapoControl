@@ -146,6 +146,15 @@ class TapoController:
         await self._call(ip, lambda plug: plug.on() if on else plug.off())
 
     @_mapped
+    async def set_timer(self, ip: str, minutes: int, on: bool) -> None:
+        """Switch the plug on or off once, `minutes` from now. The plug runs the timer itself."""
+        await self._call(ip, lambda plug: plug.set_timer(minutes * 60, on))
+
+    @_mapped
+    async def clear_timer(self, ip: str) -> None:
+        await self._call(ip, lambda plug: plug.clear_timer())
+
+    @_mapped
     async def snapshot(self, ip: str) -> tuple[bool, float]:
         """Return (is_on, watts)."""
 
@@ -174,7 +183,8 @@ class TapoController:
     async def hourly_today(self, ip: str) -> list[int]:
         """Wh per hour since midnight, one entry per elapsed hour including the current one."""
         now = datetime.now()
-        data = await self._call(ip, lambda plug: plug.get_energy_data(EnergyDataInterval.Hourly, now.date(), now.date()))
+        today = now.date()
+        data = await self._call(ip, lambda plug: plug.get_energy_data(EnergyDataInterval.Hourly, today, today))
         return [int(wh) for wh in data.entries][: now.hour + 1]
 
     @_mapped

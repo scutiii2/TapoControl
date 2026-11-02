@@ -32,7 +32,7 @@ from core.store import DeviceInfo, Store
 from ui.charts import LiveChart
 from ui.history_dialog import HistoryPanel
 from ui.login_dialog import LoginPanel
-from ui.plug_card import PlugCard
+from ui.plug_card import PlugCard, timer_note
 from ui.settings_panel import SettingsPanel
 from ui.theme import power_icon, theme
 
@@ -60,6 +60,7 @@ class MainWindow(QMainWindow):
         self._times: dict[str, deque[float]] = {}
         self._long: dict[str, list[tuple[float, float]]] = {}  # plug-stored 5-minute averages
         self._alerts = AlertEngine()
+        self._timers: dict[str, tuple[float, bool]] = {}  # ip -> (epoch deadline, switch on); set from this app only
         self._profiles: dict[str, tuple[float, dict]] = {}
         self._long_fetched: dict[str, tuple[int, float]] = {}  # ip -> (hours, monotonic time)
         self._failures: dict[str, int] = {}
@@ -347,6 +348,37 @@ class MainWindow(QMainWindow):
 
         self._submit(self._controller.set_power(ip, on), toggled)
 
+    def _set_timer(self, ip: str, minutes: int, on: bool) -> None:
+        if not self._controller or self._auth_required:
+            return
+
+        def done(_result, error):
+            if error:
+                return self._on_error(error)
+            self._timers[ip] = (time.time() + minutes * 60, on)
+            self._render_cards()
+
+        self._submit(self._controller.set_timer(ip, minutes, on), done)
+
+    def _clear_timer(self, ip: str) -> None:
+        if not self._controller or self._auth_required:
+            return
+
+        def done(_result, error):
+            if error:
+                return self._on_error(error)
+            self._timers.pop(ip, None)
+            self._render_cards()
+
+        self._submit(self._controller.clear_timer(ip), done)
+
+    def _timer_note(self, ip: str) -> str:
+        deadline, on = self._timers.get(ip, (0.0, False))
+        if deadline <= time.time():
+            self._timers.pop(ip, None)
+            return ""
+        return timer_note(deadline - time.time(), on)
+
     def set_all_power(self, on: bool) -> None:
         if not self._controller or self._auth_required:
             return
@@ -476,6 +508,8 @@ class MainWindow(QMainWindow):
             card.power_requested.connect(lambda on, ip=ip: self._toggle_ip(ip, on))
             card.rename_requested.connect(lambda ip=ip: self._card_action(ip, "rename"))
             card.energy_requested.connect(lambda ip=ip: self._card_action(ip, "energy"))
+            card.timer_requested.connect(lambda minutes, on, ip=ip: self._set_timer(ip, minutes, on))
+            card.timer_cancelled.connect(lambda ip=ip: self._clear_timer(ip))
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, ip)
             item.setSizeHint(QSize(0, 84))
@@ -515,6 +549,7 @@ class MainWindow(QMainWindow):
                 ip in self._power_pending or self._controller is None or self._auth_required,
                 self._samples.get(ip, ()),
                 price,
+                self._timer_note(ip),
             )
 
     def _window_changed(self) -> None:
@@ -550,7 +585,9 @@ class MainWindow(QMainWindow):
             self._chart_note.setToolTip(str(error) if error else "")
             if error or not result:
                 # Unsupported or failing history: the chart keeps our own readings plus the learned pattern.
-                self._chart_note.setText("The plug has no stored power history, so dashed parts are estimated from its usual day.")
+                self._chart_note.setText(
+                    "The plug has no stored power history, so dashed parts are estimated from its usual day."
+                )
             else:
                 self._chart_note.setText("")
                 self._long[ip] = result

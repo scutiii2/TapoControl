@@ -1,9 +1,20 @@
 """Plug cards with confirmed power state and keyboard-accessible controls."""
+import math
 from collections.abc import Sequence
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
-from PySide6.QtWidgets import QAbstractButton, QFrame, QHBoxLayout, QLabel, QMenu, QSizePolicy, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QAbstractButton,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QSizePolicy,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ui.theme import theme
 
@@ -27,6 +38,22 @@ class PowerSwitch(QAbstractButton):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(c.accent_text if self.isChecked() and self.isEnabled() else c.muted))
         painter.drawEllipse(QRectF(26 if self.isChecked() else 6, 8, 16, 16))
+
+
+TIMERS = (
+    ("Turn off in 15 minutes", 15, False),
+    ("Turn off in 30 minutes", 30, False),
+    ("Turn off in 1 hour", 60, False),
+    ("Turn off in 2 hours", 120, False),
+    ("Turn on in 30 minutes", 30, True),
+    ("Turn on in 1 hour", 60, True),
+)
+
+
+def timer_note(remaining_seconds: float, on: bool) -> str:
+    minutes = max(1, math.ceil(remaining_seconds / 60))
+    when = f"{minutes} min" if minutes < 90 else f"{minutes // 60} h {minutes % 60:02d} min"
+    return f"{'on' if on else 'off'} in {when}"
 
 
 def hourly_cost(watts: float, price_per_kwh: float) -> float:
@@ -84,6 +111,8 @@ class PlugCard(QFrame):
     power_requested = Signal(bool)
     rename_requested = Signal()
     energy_requested = Signal()
+    timer_requested = Signal(int, bool)  # minutes, switch on
+    timer_cancelled = Signal()
 
     def __init__(self, ip: str):
         super().__init__()
@@ -93,6 +122,7 @@ class PlugCard(QFrame):
         self._on = False
         self._name = ElidedLabel()
         self._name.setStyleSheet("font-size: 15px; font-weight: 600;")
+        self._address = ip
         self._ip = QLabel(ip)
         self._ip.setProperty("tone", "muted")
         self._ip.setTextFormat(Qt.TextFormat.PlainText)
@@ -113,10 +143,15 @@ class PlugCard(QFrame):
         menu = QMenu(self)
         menu.addAction("Rename…", self.rename_requested.emit)
         menu.addAction("Energy…", self.energy_requested.emit)
+        timer = menu.addMenu("Timer")
+        for label, minutes, on in TIMERS:
+            timer.addAction(label, lambda m=minutes, o=on: self.timer_requested.emit(m, o))
+        timer.addSeparator()
+        timer.addAction("Cancel timer", self.timer_cancelled.emit)
         self._menu = QToolButton()
         self._menu.setText("…")
         self._menu.setAccessibleName(f"Actions for {ip}")
-        self._menu.setToolTip("Rename or view energy")
+        self._menu.setToolTip("Rename, energy or timer")
         self._menu.setMenu(menu)
         self._menu.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._menu.setFixedSize(36, 34)
@@ -153,7 +188,8 @@ class PlugCard(QFrame):
         self.power_requested.emit(on)
 
     def update_state(self, name: str, state: tuple[bool, float] | None, selected: bool, busy: bool,
-                     samples: Sequence[float] = (), price: float = 0.0) -> None:
+                     samples: Sequence[float] = (), price: float = 0.0, note: str = "") -> None:
+        self._ip.setText(f"{self._address} · {note}" if note else self._address)
         self._name.setText(name)
         self._name.setTextFormat(Qt.TextFormat.PlainText)
         self._spark.set_values(samples if state else ())

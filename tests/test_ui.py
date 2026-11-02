@@ -38,6 +38,12 @@ class FakeController:
         self.calls.append(("energy", ip))
         return EnergySummary(420, 12680)
 
+    async def set_timer(self, ip, minutes, on):
+        self.calls.append(("timer", ip, minutes, on))
+
+    async def clear_timer(self, ip):
+        self.calls.append(("clear_timer", ip))
+
     async def usage(self, ip):
         self.calls.append(("usage", ip))
         return UsageSummary(700, 3000, 300, 1200)
@@ -388,3 +394,19 @@ def test_csv_export_writes_shown_rows(window, monkeypatch, tmp_path):
     panel._export_csv()
     assert target.read_text(encoding="utf-8").splitlines()[0] == "month,kWh,cost"
     assert "days stored since" in panel._detail.text()
+
+
+def test_timer_menu_sets_timer_and_card_shows_countdown(window):
+    from ui.plug_card import timer_note
+
+    w, runner, controller = window
+    ip = "192.168.1.3"
+    w._cards[ip].timer_requested.emit(30, False)
+    runner.finish()
+    assert ("timer", ip, 30, False) in controller.calls
+    w._render_cards()
+    assert w._cards[ip]._ip.text() == f"{ip} · off in 30 min"
+    w._cards[ip].timer_cancelled.emit()
+    runner.finish()
+    assert ("clear_timer", ip) in controller.calls and w._cards[ip]._ip.text() == ip
+    assert timer_note(95 * 60, True) == "on in 1 h 35 min" and timer_note(5, False) == "off in 1 min"

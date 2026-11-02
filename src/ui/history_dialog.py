@@ -4,7 +4,17 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QFileDialog, QPushButton, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from core.async_runner import AsyncRunner
 from core.export import history_csv
@@ -245,7 +255,8 @@ class HistoryPanel(QWidget):
         """Say how much daily history is on file, so a missing history is visible rather than silent."""
         if self._loading_older or self._ip is None:
             return
-        stored = f"{len(self._rows)} days stored since {self._rows[0][0]:%d %b %Y}" if self._rows else "no daily history stored"
+        first = f"{self._rows[0][0]:%d %b %Y}" if self._rows else ""
+        stored = f"{len(self._rows)} days stored since {first}" if self._rows else "no daily history stored"
         self._detail.setText(f"{self._ip} · {stored}")
 
     def _export_csv(self) -> None:

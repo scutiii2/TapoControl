@@ -1,5 +1,5 @@
 """Settings tab: start with Windows and notification limits."""
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QCheckBox, QFormLayout, QFrame, QLabel, QSpinBox, QVBoxLayout, QWidget
 
 from core import autostart as real_autostart
@@ -9,7 +9,9 @@ from core.store import Store
 
 def load_alert_settings(store: Store) -> AlertSettings:
     return AlertSettings(
-        int(store.setting("alert_watts", "0")), int(store.setting("alert_minutes", "0")), store.setting("alert_offline", "0") == "1"
+        int(store.setting("alert_watts", "0")),
+        int(store.setting("alert_minutes", "0")),
+        store.setting("alert_offline", "0") == "1",
     )
 
 
