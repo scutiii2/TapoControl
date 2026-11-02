@@ -91,3 +91,23 @@ def test_quarter_start_and_daily_rows():
     assert quarter_start(date(2026, 3, 31)) == date(2026, 1, 1)
     rows = daily_rows(date(2026, 10, 30), [10, 20, 30, 40], date(2026, 11, 1))
     assert rows == [(date(2026, 10, 30), 10), (date(2026, 10, 31), 20), (date(2026, 11, 1), 30)]
+
+
+def test_nickname_follows_device_to_new_ip(store):
+    store.save_devices([DeviceInfo("1.1.1.1", "plug", "P110", "id1")])
+    store.set_nickname("1.1.1.1", "Desk")
+    store.save_devices([DeviceInfo("1.1.1.7", "plug", "P110", "id1")])
+    assert [(d.ip, d.alias) for d in store.devices()] == [("1.1.1.7", "Desk")]
+
+
+def test_old_devices_table_gets_device_id_column(tmp_path):
+    import sqlite3
+
+    old = sqlite3.connect(tmp_path / "old.db")
+    old.execute("CREATE TABLE devices (ip TEXT PRIMARY KEY, alias TEXT NOT NULL, model TEXT NOT NULL)")
+    old.execute("INSERT INTO devices VALUES ('1.1.1.1', 'a', 'P110')")
+    old.commit()
+    old.close()
+    s = Store(tmp_path / "old.db")
+    assert s.devices() == [DeviceInfo("1.1.1.1", "a", "P110", "")]
+    s.close()

@@ -14,6 +14,7 @@ class DeviceInfo:
     ip: str
     alias: str
     model: str
+    device_id: str = ""
 
 
 def default_db_path() -> Path:
@@ -31,6 +32,8 @@ class Store:
             "CREATE TABLE IF NOT EXISTS nicknames (ip TEXT PRIMARY KEY, nickname TEXT NOT NULL);"
             "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
         )
+        if "device_id" not in [r[1] for r in self._db.execute("PRAGMA table_info(devices)")]:
+            self._db.execute("ALTER TABLE devices ADD COLUMN device_id TEXT NOT NULL DEFAULT ''")
 
     def save_account(self, email: str, password: str) -> None:
         with self._db:
@@ -44,13 +47,21 @@ class Store:
         return (email, password) if password else None
 
     def save_devices(self, devices: list[DeviceInfo]) -> None:
+        old_ips = {r[0]: r[1] for r in self._db.execute("SELECT device_id, ip FROM devices WHERE device_id != ''")}
         with self._db:
+            for d in devices:
+                # Same device at a new IP: its nickname moves with it.
+                if d.device_id in old_ips and old_ips[d.device_id] != d.ip:
+                    self._db.execute("UPDATE OR REPLACE nicknames SET ip = ? WHERE ip = ?", (d.ip, old_ips[d.device_id]))
             self._db.execute("DELETE FROM devices")
-            self._db.executemany("INSERT INTO devices VALUES (?, ?, ?)", [(d.ip, d.alias, d.model) for d in devices])
+            self._db.executemany(
+                "INSERT INTO devices (ip, alias, model, device_id) VALUES (?, ?, ?, ?)",
+                [(d.ip, d.alias, d.model, d.device_id) for d in devices],
+            )
 
     def devices(self) -> list[DeviceInfo]:
         rows = self._db.execute(
-            "SELECT d.ip, COALESCE(n.nickname, d.alias) AS name, d.model FROM devices d "
+            "SELECT d.ip, COALESCE(n.nickname, d.alias) AS name, d.model, d.device_id FROM devices d "
             "LEFT JOIN nicknames n ON n.ip = d.ip ORDER BY name"
         )
         return [DeviceInfo(*r) for r in rows]

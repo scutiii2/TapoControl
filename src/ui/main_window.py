@@ -1,3 +1,4 @@
+import time
 from collections import deque
 
 from PySide6.QtCore import Qt, QTimer
@@ -26,6 +27,8 @@ from ui.login_dialog import LoginDialog
 
 REFRESH_MS = 5000
 SAMPLES = 120  # 10 minutes of watts at REFRESH_MS
+OFFLINE_RESCAN_AFTER = 3  # consecutive failed refreshes before looking for a new IP
+RESCAN_COOLDOWN_S = 60
 
 
 class MainWindow(QMainWindow):
@@ -39,6 +42,8 @@ class MainWindow(QMainWindow):
         self._state: dict[str, tuple[bool, float]] = {}
         self._inflight: set[str] = set()
         self._samples: dict[str, deque[float]] = {}
+        self._failures: dict[str, int] = {}
+        self._last_rescan = 0.0
 
         self._list = QListWidget()
         self._chart = LiveChart(SAMPLES)
@@ -187,6 +192,7 @@ class MainWindow(QMainWindow):
         self._store.save_devices(devices)
         self._devices = {d.ip: d for d in self._store.devices()}
         self._state = {ip: s for ip, s in self._state.items() if ip in self._devices}
+        self._failures = {ip: n for ip, n in self._failures.items() if ip in self._devices}
         self._render()
         self.statusBar().showMessage(f"Found {len(devices)} P110" if devices else "No P110 found", 5000)
         self.refresh()
@@ -197,10 +203,20 @@ class MainWindow(QMainWindow):
             self._state.pop(ip, None)
             if isinstance(error, AuthError):
                 return self._on_error(error)
+            self._failures[ip] = self._failures.get(ip, 0) + 1
+            self._maybe_rescan(ip)
         elif state:
+            self._failures.pop(ip, None)
             self._state[ip] = state
             self._samples.setdefault(ip, deque(maxlen=SAMPLES)).append(state[1])
         self._render()
+
+    def _maybe_rescan(self, ip: str) -> None:
+        """A plug that keeps failing may have a new IP (DHCP); rescan, rate limited."""
+        now = time.monotonic()
+        if self._failures[ip] >= OFFLINE_RESCAN_AFTER and now - self._last_rescan >= RESCAN_COOLDOWN_S:
+            self._last_rescan = now
+            self.scan()
 
     def _on_toggled(self, _result, error: BaseException | None) -> None:
         if error:
@@ -222,7 +238,7 @@ class MainWindow(QMainWindow):
         for ip, d in self._devices.items():
             state = self._state.get(ip)
             if state is None:
-                status = "offline / unknown"
+                status = "offline - retrying"
             else:
                 on, watts = state
                 status = f"{'ON' if on else 'OFF'}  {watts:.1f} W"

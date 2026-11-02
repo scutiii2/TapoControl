@@ -50,8 +50,8 @@ def _mapped(fn):
 
 
 class TapoController:
-    def __init__(self, email: str, password: str):
-        self._client = ApiClient(email, password)
+    def __init__(self, email: str, password: str, client=None):
+        self._client = client or ApiClient(email, password)
 
     async def _find_ips(self, timeout: int) -> list[str]:
         """Broadcast discovery needs no credentials; python-kasa only finds IPs, tapo does the control."""
@@ -72,7 +72,7 @@ class TapoController:
 
         async def info(ip: str) -> DeviceInfo:
             i = await (await self._client.p110(ip)).get_device_info()
-            return DeviceInfo(ip, i.nickname or ip, i.model)
+            return DeviceInfo(ip, i.nickname or ip, i.model, i.device_id)
 
         return sorted(await asyncio.gather(*map(info, ips)), key=lambda d: d.alias)
 
