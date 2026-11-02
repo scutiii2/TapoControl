@@ -1,29 +1,78 @@
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QFrame, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
+
+from ui.theme import theme
 
 
-class LoginDialog(QDialog):
-    """Asks for the Tapo account credentials at runtime."""
+class LoginPanel(QWidget):
+    """Account tab submits runtime credentials without a modal event loop."""
+
+    submitted = Signal()
 
     def __init__(self, parent=None, email: str = "", message: str = ""):
         super().__init__(parent)
-        self.setWindowTitle("Tapo account")
+        theme()
         self.email = QLineEdit(email)
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
-        form = QFormLayout()
-        form.addRow("Email", self.email)
-        form.addRow("Password", self.password)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self._accept)
-        buttons.rejected.connect(self.reject)
+        self.email.setPlaceholderText("you@example.com")
+        self.email.setAccessibleName("Tapo account email")
+        self.password.setAccessibleName("Tapo account password")
+        self.email.setMaximumWidth(560)
+        self.password.setMaximumWidth(560)
+        self.email.returnPressed.connect(self.password.setFocus)
+        self.password.returnPressed.connect(self._accept)
+        title = QLabel("Tapo account")
+        title.setProperty("role", "heading")
+        detail = QLabel("Use your Tapo app account to control plugs.")
+        detail.setProperty("tone", "muted")
+        detail.setWordWrap(True)
+        card = QFrame()
+        card.setProperty("card", True)
+        form = QVBoxLayout(card)
+        form.setContentsMargins(24, 24, 24, 24)
+        form.setSpacing(12)
+        for text, field in (("&Email", self.email), ("&Password", self.password)):
+            label = QLabel(text)
+            label.setBuddy(field)
+            form.addWidget(label)
+            form.addWidget(field)
+            form.addSpacing(8)
+        note = QLabel("Password saved in Windows Credential Manager.")
+        note.setProperty("tone", "muted")
+        note.setWordWrap(True)
+        form.addWidget(note)
+        self._message = QLabel()
+        self._message.setProperty("tone", "error")
+        self._message.setTextFormat(Qt.TextFormat.PlainText)
+        self._message.setWordWrap(True)
+        form.addWidget(self._message)
+        self._submit = QPushButton("Sign in")
+        self._submit.setProperty("primary", True)
+        self._submit.clicked.connect(self._accept)
+        form.addWidget(self._submit, 0, Qt.AlignmentFlag.AlignLeft)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(message or "Use the email and password of your Tapo app account."))
-        layout.addLayout(form)
-        layout.addWidget(buttons)
+        layout.setContentsMargins(0, 20, 0, 8)
+        layout.setSpacing(16)
+        layout.addWidget(title)
+        layout.addWidget(detail)
+        layout.addWidget(card)
+        layout.addStretch()
+        self.set_message(message)
+
+    def set_message(self, message: str = "", error: bool = True) -> None:
+        self._message.setText(message)
+        self._message.setProperty("tone", "error" if error else "muted")
+        self._message.style().unpolish(self._message)
+        self._message.style().polish(self._message)
+        self._message.setVisible(bool(message))
 
     def _accept(self) -> None:
         if self.email.text().strip() and self.password.text():
-            self.accept()
+            self.submitted.emit()
+        else:
+            self.set_message("Enter your Tapo email and password.")
+            (self.email if not self.email.text().strip() else self.password).setFocus()
 
     def credentials(self) -> tuple[str, str]:
         return self.email.text().strip(), self.password.text()
