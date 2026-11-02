@@ -1,7 +1,9 @@
 """Plug cards with confirmed power state and keyboard-accessible controls."""
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QAbstractButton, QFrame, QHBoxLayout, QLabel, QMenu, QSizePolicy, QToolButton, QVBoxLayout
+from collections.abc import Sequence
+
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
+from PySide6.QtWidgets import QAbstractButton, QFrame, QHBoxLayout, QLabel, QMenu, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
 from ui.theme import theme
 
@@ -19,12 +21,41 @@ class PowerSwitch(QAbstractButton):
         c = theme().colors
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(c.accent if self.hasFocus() else c.border), 1))
+        painter.setPen(QPen(QColor(c.accent if self.hasFocus() else c.control), 1))
         painter.setBrush(QColor(c.accent if self.isChecked() and self.isEnabled() else c.raised))
         painter.drawRoundedRect(QRectF(2, 4, 46, 24), 12, 12)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(c.accent_text if self.isChecked() and self.isEnabled() else c.muted))
         painter.drawEllipse(QRectF(26 if self.isChecked() else 6, 8, 16, 16))
+
+
+class Sparkline(QWidget):
+    """Recent watts of one plug, scaled to its own range."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(84, 30)
+        self._values: Sequence[float] = ()
+        theme().changed.connect(self.update)
+
+    def set_values(self, values: Sequence[float]) -> None:
+        self._values = list(values)
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        if len(self._values) < 2:
+            return
+        lo, hi = min(self._values), max(self._values)
+        span = (hi - lo) or 1.0
+        step = (self.width() - 4) / (len(self._values) - 1)
+        points = QPolygonF([
+            QPointF(2 + i * step, self.height() - 3 - (v - lo) / span * (self.height() - 6))
+            for i, v in enumerate(self._values)
+        ])
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(theme().colors.accent), 1.5))
+        painter.drawPolyline(points)
 
 
 class ElidedLabel(QLabel):
@@ -67,6 +98,7 @@ class PlugCard(QFrame):
         self._watts.setFixedWidth(90)
         self._watts.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._watts.setStyleSheet("font-size: 21px; font-weight: 600;")
+        self._spark = Sparkline()
         self.toggle = PowerSwitch(self)
         self.toggle.setAccessibleName(f"Power for {ip}")
         self.toggle.clicked.connect(self._request_power)
@@ -90,6 +122,7 @@ class PlugCard(QFrame):
         labels.addWidget(self._ip)
         row.addLayout(labels, 1)
         row.addWidget(self._status)
+        row.addWidget(self._spark)
         row.addWidget(self._watts)
         row.addWidget(self.toggle)
         row.addWidget(self._menu)
@@ -107,9 +140,11 @@ class PlugCard(QFrame):
         self.toggle.setChecked(self._on)
         self.power_requested.emit(on)
 
-    def update_state(self, name: str, state: tuple[bool, float] | None, selected: bool, busy: bool) -> None:
+    def update_state(self, name: str, state: tuple[bool, float] | None, selected: bool, busy: bool,
+                     samples: Sequence[float] = ()) -> None:
         self._name.setText(name)
         self._name.setTextFormat(Qt.TextFormat.PlainText)
+        self._spark.set_values(samples if state else ())
         self._on = bool(state and state[0])
         self._status.setText("●  ON" if self._on else "●  OFF" if state else "Offline - retrying")
         self._status.setProperty("tone", "success" if self._on else "muted")

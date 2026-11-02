@@ -12,6 +12,7 @@ class Colors:
     surface: str
     raised: str
     border: str
+    control: str  # 3:1 against surfaces, for switch outlines and input borders
     text: str
     muted: str
     accent: str
@@ -22,11 +23,11 @@ class Colors:
 
 
 DARK = Colors(
-    "#171a21", "#20242d", "#292e39", "#465164", "#f1f4fa", "#b3bed0",
+    "#171a21", "#20242d", "#292e39", "#465164", "#7c8aa0", "#f1f4fa", "#b3bed0",
     "#82b5ff", "#132137", "#25364e", "#7cdebb", "#ffb4b4",
 )
 LIGHT = Colors(
-    "#f3f5f9", "#ffffff", "#edf1f6", "#c7d0de", "#192332", "#53637b",
+    "#f3f5f9", "#ffffff", "#edf1f6", "#c7d0de", "#7a889e", "#192332", "#53637b",
     "#185cce", "#ffffff", "#eaf2ff", "#15765b", "#b32632",
 )
 
@@ -107,6 +108,7 @@ class Theme(QObject):
             QFrame[card="true"] {{ background: {c.surface}; border: 1px solid {c.border}; border-radius: 10px; }}
             QFrame#DeviceCard[selected="true"] {{ background: {c.selected}; border-color: {c.accent}; }}
             QFrame#DeviceCard[offline="true"] QLabel {{ color: {c.muted}; }}
+            QFrame#DeviceCard[offline="true"] {{ border-style: dashed; }}
             QPushButton, QToolButton {{ background: {c.surface}; border: 1px solid {c.border};
                 border-radius: 6px; padding: 8px 14px; min-height: 18px; }}
             QPushButton:hover, QToolButton:hover {{ background: {c.raised}; border-color: {c.accent}; }}
@@ -115,7 +117,7 @@ class Theme(QObject):
             QPushButton[primary="true"] {{ background: {c.accent}; color: {c.accent_text}; font-weight: 600; }}
             QPushButton:disabled, QToolButton:disabled {{ color: {c.muted}; background: {c.raised}; }}
             QToolButton::menu-indicator {{ image: none; }}
-            QLineEdit, QDoubleSpinBox {{ background: {c.surface}; color: {c.text}; border: 1px solid {c.border};
+            QLineEdit, QDoubleSpinBox {{ background: {c.surface}; color: {c.text}; border: 1px solid {c.control};
                 border-radius: 6px; padding: 9px; min-height: 18px; selection-background-color: {c.accent}; }}
             QLineEdit:focus, QDoubleSpinBox:focus {{ border-color: {c.accent}; }}
             QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{ width: 20px; }}

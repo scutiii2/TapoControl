@@ -437,7 +437,8 @@ class MainWindow(QMainWindow):
         self._empty.setVisible(not self._devices)
         self._list.setVisible(bool(self._devices))
         online = sum(ip in self._state for ip in self._devices)
-        self._count.setText(f"DEVICES · {len(self._devices)} plugs · {online} online")
+        total = sum(w for _, w in self._state.values())
+        self._count.setText(f"DEVICES · {len(self._devices)} plugs · {online} online · {total:.1f} W now")
         enabled = self._controller is not None and not self._auth_required
         self._scan.setEnabled(enabled)
         self._all_on.setEnabled(enabled and bool(self._devices))
@@ -456,9 +457,14 @@ class MainWindow(QMainWindow):
             card.update_state(
                 self._devices[ip].alias, self._state.get(ip), ip == selected,
                 ip in self._power_pending or self._controller is None or self._auth_required,
+                self._samples.get(ip, ()),
             )
 
     def _render_chart(self) -> None:
         ip = self._selected_ip()
-        title = f"{self._devices[ip].alias} - live watts" if ip in self._devices else "Select a plug"
-        self._chart.show_samples(self._samples.get(ip), title)
+        samples = self._samples.get(ip)
+        if ip in self._devices and samples:
+            title = f"{self._devices[ip].alias} · now {samples[-1]:.1f} W · peak {max(samples):.1f} W"
+        else:
+            title = f"{self._devices[ip].alias} - live watts" if ip in self._devices else "Select a plug"
+        self._chart.show_samples(samples, title)
