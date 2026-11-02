@@ -56,6 +56,7 @@ class LiveChart(QChartView):
         self._max = max_samples
         self._points: list[tuple[float, float]] = []  # (slot, watts); slot == max_samples is "now"
         self._lines: list[QLineSeries] = []
+        self._bridges: list[QLineSeries] = []
         self._hover: int | None = None
         self._span = max_samples * SAMPLE_SECONDS
         self._gap_slots = GAP_SLOTS
@@ -73,14 +74,20 @@ class LiveChart(QChartView):
         style_chart(self)
         for line in self._lines:
             line.setPen(QPen(QColor(theme().colors.accent), 2.5))
+        for line in self._bridges:
+            pen = QPen(QColor(theme().colors.control), 1.5, Qt.PenStyle.DashLine)
+            line.setPen(pen)
 
     def show_samples(
         self, samples: deque[float] | None, title: str, times: Sequence[float] | None = None,
         span: float | None = None, interval: float = SAMPLE_SECONDS,
+        estimates: Sequence[tuple[float, float]] = (),
     ) -> None:
         """`times` are epoch seconds per sample; with them, gaps (app closed) show as gaps.
 
         `span` is the window in seconds (default: the live window); `interval` the normal spacing of samples.
+        `estimates` are (epoch seconds, watts) the plug stored itself; a gap's dashed line runs through those
+        points, or straight across when there are none.
         """
         self._span = span or self._max * SAMPLE_SECONDS
         self._gap_slots = GAP_SLOTS * interval / self._span * self._max
@@ -95,28 +102,40 @@ class LiveChart(QChartView):
             offset = self._max - len(samples)
             points = [(offset + i, w) for i, w in enumerate(samples)]
         self._points = points
-        for line in self._lines:
+        for line in self._lines + self._bridges:
             self.chart().removeSeries(line)
-        self._lines = []
-        segment: list[tuple[float, float]] = []
-        for point in points + [None]:
-            if point is not None and (not segment or point[0] - segment[-1][0] <= self._gap_slots):
-                segment.append(point)
-                continue
-            if segment:
-                line = QLineSeries()
-                line.append([QPointF(x, w) for x, w in segment])
-                self.chart().addSeries(line)
-                line.attachAxis(self._x)
-                line.attachAxis(self._y)
-                self._lines.append(line)
-            segment = [point] if point is not None else []
+        self._lines, self._bridges = [], []
+        segments: list[list[tuple[float, float]]] = []
+        for point in points:
+            if segments and point[0] - segments[-1][-1][0] <= self._gap_slots:
+                segments[-1].append(point)
+            else:
+                segments.append([point])
+        for i, segment in enumerate(segments):
+            if i:  # dashed link over the gap: nothing was measured there
+                before, after = segments[i - 1][-1], segment[0]
+                inside = sorted(
+                    (x, w) for x, w in ((self._slot(t), w) for t, w in estimates) if before[0] < x < after[0]
+                )
+                self._add_line([before, *inside, after], self._bridges)
+            self._add_line(segment, self._lines)
         peak = max((w for _, w in points), default=0)
         self._y.setRange(0, max(10.0, peak * 1.2))
         self._y.applyNiceNumbers()
         self._y.setLabelFormat("%.1f" if peak < 10 else "%.0f")
         self._apply_theme()
         self.viewport().update()
+
+    def _slot(self, ts: float) -> float:
+        return self._max - (time.time() - ts) / self._span * self._max
+
+    def _add_line(self, points: list[tuple[float, float]], into: list[QLineSeries]) -> None:
+        line = QLineSeries()
+        line.append([QPointF(x, w) for x, w in points])
+        self.chart().addSeries(line)
+        line.attachAxis(self._x)
+        line.attachAxis(self._y)
+        into.append(line)
 
     def _index_at(self, x: float) -> int | None:
         area = self.chart().mapRectToScene(self.chart().plotArea())

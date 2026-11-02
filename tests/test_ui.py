@@ -316,6 +316,7 @@ def test_live_chart_breaks_line_over_gap_and_keeps_restored_samples():
     now = time.time()
     chart.show_samples([5.0, 6.0, 7.0], "x", [now - 400, now - 395, now - 5])
     assert len(chart._lines) == 2  # app was closed between the second and third reading
+    assert len(chart._bridges) == 1  # dashed link across that gap
     chart.show_samples([5.0], "x", [now - 900])  # older than the 10 minute window
     assert chart._lines == [] and chart._points == []
 
@@ -333,3 +334,16 @@ def test_long_chart_window_fetches_plug_history_and_ignores_failure(window):
     w._fetch_long()
     runner.pending[-1][1](None, RuntimeError("unsupported"))  # failure keeps what the chart already had
     assert w._long[ip] == before and len(w._chart._points) == 2
+
+
+def test_gap_is_dashed_through_plug_estimates():
+    from ui.charts import LiveChart
+
+    chart = LiveChart(120)
+    now = time.time()
+    estimates = [(now - 300, 50.0), (now - 100, 60.0)]
+    chart.show_samples([5.0, 6.0], "x", [now - 500, now - 20], estimates=estimates)
+    [bridge] = chart._bridges
+    assert bridge.count() == 4  # last reading, two plug averages inside the gap, next reading
+    chart.show_samples([5.0, 6.0], "x", [now - 500, now - 20])
+    assert chart._bridges[0].count() == 2  # no estimates: straight dashed line

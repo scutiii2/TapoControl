@@ -499,9 +499,15 @@ class MainWindow(QMainWindow):
         self._fetch_long()
         self._render_chart()
 
+    def _has_gap(self, ip: str) -> bool:
+        times = list(self._times.get(ip, ()))
+        return any(b - a > 2.5 * REFRESH_MS / 1000 for a, b in zip(times, times[1:]))
+
     def _fetch_long(self) -> None:
         """Pull the plug's own 5-minute history for the selected plug when a long window is chosen."""
         ip, hours = self._selected_ip(), self._window.currentData()
+        if not hours and ip is not None and self._has_gap(ip):
+            hours = 1  # the live view only needs the plug's averages to estimate across its gaps
         if not hours or ip is None or not self._controller or self._auth_required:
             return
         last = self._long_fetched.get(ip)
@@ -533,4 +539,4 @@ class MainWindow(QMainWindow):
             title = f"{name} · now {samples[-1]:.1f} W · peak {max(samples):.1f} W"
         else:
             title = f"{name} - live watts" if name else "Select a plug"
-        self._chart.show_samples(samples, title, self._times.get(ip))
+        self._chart.show_samples(samples, title, self._times.get(ip), estimates=self._long.get(ip, ()))
