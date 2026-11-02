@@ -5,6 +5,7 @@ from PySide6.QtWidgets import QCheckBox, QFormLayout, QFrame, QLabel, QSpinBox, 
 from core import autostart as real_autostart
 from core.alerts import AlertSettings
 from core.store import Store
+from ui import tokens as t
 
 
 def load_alert_settings(store: Store) -> AlertSettings:
@@ -45,25 +46,36 @@ class SettingsPanel(QWidget):
             widget.valueChanged.connect(self._save)
         self.offline.toggled.connect(self._save)
 
+        startup = QFrame()
+        startup.setProperty("card", True)
+        startup_layout = QVBoxLayout(startup)
+        startup_layout.setContentsMargins(t.CARD_PAD, t.CARD_PAD, t.CARD_PAD, t.CARD_PAD)
+        startup_layout.setSpacing(t.SP_SM)
+        startup_layout.addWidget(self.start_with_windows)
+        startup_layout.addWidget(self._autostart_error)
         alerts = QFrame()
         alerts.setProperty("card", True)
         form = QFormLayout(alerts)
-        form.setContentsMargins(20, 16, 20, 16)
-        form.setVerticalSpacing(12)
+        form.setContentsMargins(t.CARD_PAD, t.CARD_PAD, t.CARD_PAD, t.CARD_PAD)
+        form.setVerticalSpacing(t.SP_MD)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)  # a field stays beside its label
         form.addRow("Notify above", self.watts)
         form.addRow("Notify when on longer than", self.minutes)
         form.addRow(self.offline)
 
+        startup_heading = QLabel("Start-up")
+        startup_heading.setProperty("role", "heading")
         heading = QLabel("Notifications")
         heading.setProperty("role", "heading")
         note = QLabel("Each notice appears once per episode, from the tray, while the app is running.")
         note.setProperty("tone", "muted")
         note.setWordWrap(True)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 20, 0, 8)
-        layout.setSpacing(14)
-        layout.addWidget(self.start_with_windows)
-        layout.addWidget(self._autostart_error)
+        layout.setContentsMargins(0, t.PAGE_TOP, 0, 0)
+        layout.setSpacing(t.SP_SM)
+        layout.addWidget(startup_heading)
+        layout.addWidget(startup)
+        layout.addSpacing(t.SP_LG)  # a larger gap between the two groups than inside each
         layout.addWidget(heading)
         layout.addWidget(alerts)
         layout.addWidget(note)

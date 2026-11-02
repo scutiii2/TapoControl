@@ -9,7 +9,8 @@ from PySide6.QtCore import QMargins, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QWidget
 
-from ui.theme import theme
+from ui import tokens as t
+from ui.theme import series_color, theme
 
 SAMPLE_SECONDS = 5  # must match the main window's refresh interval
 GAP_SLOTS = 2.5  # further apart than this many sample intervals and the line breaks
@@ -35,7 +36,7 @@ def style_chart(view: QChartView) -> None:
     colors = theme().colors
     chart = view.chart()
     chart.setBackgroundBrush(QColor(colors.surface))
-    chart.setBackgroundRoundness(10)
+    chart.setBackgroundRoundness(t.RADIUS_LG)
     chart.setPlotAreaBackgroundVisible(False)
     chart.setTitleBrush(QColor(colors.text))
     chart.setTitleFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
@@ -50,20 +51,23 @@ def style_chart(view: QChartView) -> None:
 
 
 OVERALL = "overall"  # toggle key for the sum of all plugs
-# One per plug, in order; the overall wears the theme accent.
-LINE_COLORS = ("#4c9aff", "#ff8a3d", "#3ddc97", "#e86ac9", "#f5c542", "#9b7bff", "#35c4d8", "#ff6b6b")
 
 
 class LineColors:
-    """A plug keeps its color whatever the filter, so toggling never repaints the others."""
+    """A plug keeps its color slot whatever the filter, so toggling never repaints the others.
+
+    A slot is an index into the theme's validated series colors. `None` is the overall, drawn in the text color.
+    """
 
     def __init__(self) -> None:
-        self._colors: dict[str, str] = {}
+        self._slots: dict[str, int] = {}
 
-    def __call__(self, key: str) -> str:
-        if key not in self._colors:
-            self._colors[key] = LINE_COLORS[len(self._colors) % len(LINE_COLORS)]
-        return self._colors[key]
+    def __call__(self, key: str) -> int:
+        return self._slots.setdefault(key, len(self._slots))
+
+
+def line_color(slot: int | None) -> str:
+    return theme().colors.text if slot is None else series_color(slot)
 
 
 def swatch(color: str) -> QIcon:
@@ -82,34 +86,42 @@ class LineToggles(QWidget):
         self._colors = colors
         self._boxes: dict[str, QCheckBox] = {}
         self._signature: tuple = ()
+        self._names: list[tuple[str, str]] = []
         self.hidden: set[str] = set()
         self._row = QHBoxLayout(self)
         self._row.setContentsMargins(0, 0, 0, 0)
-        self._row.setSpacing(14)
+        self._row.setSpacing(t.SP_LG)
+        theme().changed.connect(self._retheme)
+
+    def _retheme(self) -> None:
+        """The swatches carry theme colors, so rebuild them when the theme changes."""
+        self._signature = ()
+        self.set_plugs(self._names)
 
     def shown(self, key: str) -> bool:
         return key not in self.hidden
 
     def set_plugs(self, names: Sequence[tuple[str, str]]) -> None:
         """`names` are (ip, label); the boxes are rebuilt only when the plugs, labels or theme change."""
-        accent = theme().colors.accent
-        signature = (accent, *names)
+        signature = (theme().colors.text, theme().colors.series, *names)
         if signature == self._signature:
             return
         self._signature = signature
+        self._names = list(names)
         while self._row.count():
             item = self._row.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self._boxes = {}
         if names:
-            self._add(OVERALL, "Overall", accent)
+            self._add(OVERALL, "Overall", line_color(None))
         for key, label in names:
-            self._add(key, label, self._colors(key))
+            self._add(key, label, line_color(self._colors(key)))
         self._row.addStretch(1)
 
     def _add(self, key: str, label: str, color: str) -> None:
         box = QCheckBox(label)
+        box.setMinimumHeight(t.TARGET - t.SP_SM)  # a comfortable click area, not just the tick
         box.setIcon(swatch(color))
         box.setChecked(self.shown(key))
         box.toggled.connect(lambda on, key=key: self._toggled(key, on))
@@ -140,7 +152,7 @@ def paint_readout(
     box.moveTopLeft(QPointF(max(area.left(), edge), area.top() + 4))
     painter.setPen(QPen(QColor(c.border), 1))
     painter.setBrush(QColor(c.raised))
-    painter.drawRoundedRect(box, 6, 6)
+    painter.drawRoundedRect(box, t.RADIUS_MD, t.RADIUS_MD)
     middle = Qt.AlignmentFlag.AlignVCenter
     painter.setPen(QColor(c.muted))
     painter.drawText(QRectF(box.left() + 10, box.top() + 6, width - 20, 18), middle, head)
@@ -178,18 +190,20 @@ class BaseChart(QChartView):
         self._y.setTickCount(4)
         chart.addAxis(self._x, BOTTOM)
         chart.addAxis(self._y, LEFT)
-        self._drawn: list[tuple[QLineSeries, str | None, bool]] = []  # series, color (None: accent), dashed
+        self._drawn: list[tuple[QLineSeries, int | None, bool]] = []  # series, color slot (None: overall), dashed
+        self._empty_text = ""
         self._hover = None
         theme().changed.connect(self._apply_theme)
 
     def _apply_theme(self) -> None:
         style_chart(self)
         colors = theme().colors
-        for series, color, dashed in self._drawn:
+        for series, slot, dashed in self._drawn:
             if dashed:
-                series.setPen(QPen(QColor(color or colors.control), 1.5, Qt.PenStyle.DashLine))
-            else:
-                series.setPen(QPen(QColor(color or colors.accent), 2.5 if color is None else 2))
+                color = colors.control if slot is None else line_color(slot)
+                series.setPen(QPen(QColor(color), 1.5, Qt.PenStyle.DashLine))
+            else:  # the overall is the heavier line, so it also differs from the plugs by weight, not only by color
+                series.setPen(QPen(QColor(line_color(slot)), 3 if slot is None else 2))
         self.viewport().update()
 
     def _clear_series(self) -> None:
@@ -198,7 +212,7 @@ class BaseChart(QChartView):
         self._drawn = []
 
     def _add_series(
-        self, points: Sequence[tuple[float, float]], color: str | None, dashed: bool = False,
+        self, points: Sequence[tuple[float, float]], color: int | None, dashed: bool = False,
     ) -> QLineSeries:
         series = QLineSeries()
         series.append([QPointF(x, y) for x, y in points])
@@ -220,6 +234,14 @@ class BaseChart(QChartView):
     def _label_row(self) -> Sequence[tuple[float, str]]:
         """(fraction of the plot width, text) labels under the plot."""
         return ()
+
+    def _has_points(self) -> bool:
+        return True
+
+    def _describe(self, text: str) -> None:
+        """Screen readers cannot hover: put the chart's title and latest values into its accessible text."""
+        self.setAccessibleName(self.chart().title())
+        self.setAccessibleDescription(text)
 
     def _hover_at(self, x: float):
         """What is under the cursor at scene x (None for nothing)."""
@@ -256,6 +278,9 @@ class BaseChart(QChartView):
                 box.moveRight(area.right())
                 align = Qt.AlignmentFlag.AlignRight
             painter.drawText(box, align | Qt.AlignmentFlag.AlignVCenter, text)
+        if self._empty_text and not self._has_points():
+            painter.setFont(QFont("Segoe UI", 11))
+            painter.drawText(area, Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, self._empty_text)
         readout = self._readout(area) if self._hover is not None else None
         if readout:
             paint_readout(painter, area, *readout)
@@ -264,12 +289,12 @@ class BaseChart(QChartView):
 
 @dataclass
 class Line:
-    """One series of the live chart: `times` are epoch seconds. `color` None means the theme accent."""
+    """One series of the live chart: `times` are epoch seconds. `color` is a slot; None is the overall."""
 
     name: str
     times: Sequence[float]
     watts: Sequence[float]
-    color: str | None = None
+    color: int | None = None
     estimates: Sequence[tuple[float, float]] = ()
 
 
@@ -281,13 +306,14 @@ class LiveChart(BaseChart):
         self._x.setRange(0, max_samples)
         self._max = max_samples
         self._names: list[str] = []
-        self._colors: list[str | None] = []
+        self._colors: list[int | None] = []
         self._points: list[list[tuple[float, float]]] = []  # per line: (slot, watts); slot == max_samples is "now"
         self._lines: list[QLineSeries] = []
         self._bridges: list[QLineSeries] = []
         self._span = max_samples * SAMPLE_SECONDS
         self._gap_slots = GAP_SLOTS
         self._y.setLabelFormat("%.0f")
+        self._empty_text = "No readings yet. They appear here as the plugs answer."
         self._apply_theme()
 
     def show_samples(
@@ -338,6 +364,12 @@ class LiveChart(BaseChart):
         peak = max((w for points in self._points for _, w in points), default=0)
         self._fit_y(peak, 10.0, 1 if peak < 10 else 0)
         self._apply_theme()
+        pairs = zip(self._names, self._points, strict=True)
+        latest = [f"{name} {points[-1][1]:.1f} W" for name, points in pairs if points]
+        self._describe("Latest: " + ", ".join(latest) if latest else "No readings yet")
+
+    def _has_points(self) -> bool:
+        return any(self._points)
 
     def _slot(self, ts: float) -> float:
         return self._max - (time.time() - ts) / self._span * self._max
@@ -378,16 +410,15 @@ class LiveChart(BaseChart):
         return area.left() + self._hover / self._max * area.width(), age_text(ago), dots, entries
 
     def _color_of(self, index: int) -> str:
-        """The line's own color; the overall (no color) wears the accent."""
-        return self._colors[index] or theme().colors.accent
+        return line_color(self._colors[index])
 
 
 @dataclass
 class UsageLine:
-    """One line of the usage chart: Wh per key, None where the plug has no point. `color` None is the accent."""
+    """One line of the usage chart: Wh per key, None where the plug has no point. `color`: a slot, or None (overall)."""
 
     name: str
-    color: str | None
+    color: int | None
     wh: Sequence[int | None]
 
 
@@ -402,6 +433,7 @@ class UsageChart(BaseChart):
         self._kind = "day"
         self._lines: list[UsageLine] = []
         self._series: list[QLineSeries] = []
+        self._empty_text = "No usage recorded yet."
         self.show_lines([], [], "day")
 
     def _label(self, key, tooltip: bool = False) -> str:
@@ -424,6 +456,12 @@ class UsageChart(BaseChart):
         peak = max((wh for line in self._lines for wh in line.wh if wh is not None), default=0) / 1000
         self._fit_y(peak, 0.1, 2 if peak < 10 else 0)
         self._apply_theme()
+        shown = [line for line in self._lines if line.wh and line.wh[-1] is not None]
+        last = [f"{line.name} {line.wh[-1] / 1000:.2f} kWh" for line in shown]
+        self._describe("Latest: " + ", ".join(last) if last else "No usage recorded yet")
+
+    def _has_points(self) -> bool:
+        return bool(self._keys)
 
     def _label_row(self) -> Sequence[tuple[float, str]]:
         """Sparse labels so a whole quarter stays readable at small widths."""
@@ -441,15 +479,14 @@ class UsageChart(BaseChart):
         return min(len(self._keys) - 1, int((x - area.left()) / area.width() * len(self._keys)))
 
     def _readout(self, area: QRectF):
-        accent = theme().colors.accent
         x = area.left() + (self._hover + 0.5) * area.width() / len(self._keys)
         dots, entries = [], []
         for line in self._lines:
             wh = line.wh[self._hover]
             if wh is not None:
                 y = area.bottom() - wh / 1000 / (self._y.max() or 1) * area.height()
-                dots.append((QPointF(x, y), line.color or accent))
-                entries.append((line.color or accent, f"{line.name}  {wh / 1000:.2f} kWh"))
+                dots.append((QPointF(x, y), line_color(line.color)))
+                entries.append((line_color(line.color), f"{line.name}  {wh / 1000:.2f} kWh"))
         if not entries:
             return None
         return x, self._label(self._keys[self._hover], tooltip=True), dots, entries

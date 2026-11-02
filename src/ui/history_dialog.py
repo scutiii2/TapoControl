@@ -20,8 +20,9 @@ from core.export import history_csv
 from core.controller import AuthError, EnergySummary, TapoController, UsageSummary, monthly_totals, quarter_start
 from core.store import Store
 from ui.charts import OVERALL, LineColors, LineToggles, UsageChart, UsageLine
+from ui import tokens as t
 from ui.theme import energy_error, theme
-from ui.widgets import metric_card
+from ui.widgets import cost_line, metric_card
 
 
 RANGES = ("Today by hour", "This quarter", "Last 12 months", "All time")
@@ -97,14 +98,17 @@ class HistoryPanel(QWidget):
         self._empty.setWordWrap(True)
         self._empty.setProperty("tone", "muted")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 20, 0, 8)
-        layout.setSpacing(16)
+        layout.setContentsMargins(0, t.PAGE_TOP, 0, 0)
+        layout.setSpacing(t.SP_LG)
         layout.addLayout(header)
         layout.addLayout(totals)
         layout.addWidget(self._usage)
         layout.addWidget(self._summary_error)
-        layout.addWidget(self._toggles)
-        layout.addWidget(self._chart, 1)
+        chart = QVBoxLayout()  # the toggles belong to the chart, so they sit closer to it than to the cards
+        chart.setSpacing(t.SP_SM)
+        chart.addWidget(self._toggles)
+        chart.addWidget(self._chart, 1)
+        layout.addLayout(chart, 1)
         layout.addWidget(self._history_error)
         layout.addWidget(self._empty)
         note = QLabel("Cost uses your saved tariff. Totals add up every plug.")
@@ -192,8 +196,9 @@ class HistoryPanel(QWidget):
             today, month = sum(x.today_wh for x in sums), sum(x.month_wh for x in sums)
             self._today.setText(f"{today / 1000:.2f} kWh")
             self._month.setText(f"{month / 1000:.2f} kWh")
-            self._today_cost.setText(f"Estimated cost {self._cost(today)}")
-            self._month_cost.setText(f"Estimated cost {self._cost(month)}")
+            hint = "Set a tariff above for cost"
+            self._today_cost.setText(cost_line(today, self._price.value(), hint))
+            self._month_cost.setText(cost_line(month, self._price.value(), hint))
             self._runtime.setText(fmt_minutes(sum(x.today_minutes for x in sums)))
             self._runtime_month.setText(f"This month {fmt_minutes(sum(x.month_minutes for x in sums))}")
 

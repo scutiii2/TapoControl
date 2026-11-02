@@ -35,7 +35,8 @@ from ui.overview_page import OverviewPage
 from ui.plug_card import PlugCard, timer_note
 from ui.settings_panel import SettingsPanel
 from ui.side_tabs import SideTabs
-from ui.theme import power_icon, theme
+from ui import tokens as t
+from ui.theme import action_error, power_icon, theme
 
 REFRESH_MS = 5000
 SAMPLES = 120  # 10 minutes of watts at REFRESH_MS
@@ -43,6 +44,13 @@ OFFLINE_RESCAN_AFTER = 3  # consecutive failed refreshes before looking for a ne
 RESCAN_COOLDOWN_S = 60
 WINDOWS = (("Last 10 minutes", 0), ("Last hour", 1), ("Last 24 hours", 24))  # label, hours of plug history
 LONG_REFRESH_S = 60
+PAGES = {  # page kind -> (header title, one line about it)
+    "overview": ("Overview", "Power and usage across all your plugs."),
+    "devices": ("Devices", "Switch plugs, rename them and set timers."),
+    "energy": ("Energy", "Usage history and cost."),
+    "account": ("Account", "The Tapo account that signs in to your plugs."),
+    "settings": ("Settings", "Start-up and notifications."),
+}
 
 
 class MainWindow(QMainWindow):
@@ -67,6 +75,8 @@ class MainWindow(QMainWindow):
         self._failures: dict[str, int] = {}
         self._last_rescan = 0.0
         self._auth_required = False
+        self._scanning = False
+        self._signing_in = False
         self._generation = 0
         self._power_pending: set[str] = set()
         self._power_confirming: set[str] = set()
@@ -77,7 +87,7 @@ class MainWindow(QMainWindow):
         self._long_failed: set[str] = set()
 
         self._list = QListWidget()
-        self._list.setSpacing(5)
+        self._list.setSpacing(t.SP_SM)
         self._list.setResizeMode(QListView.ResizeMode.Adjust)
         self._list.setMinimumHeight(100)
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -92,31 +102,31 @@ class MainWindow(QMainWindow):
         self._scan = QPushButton("Scan network")
         self._scan.setProperty("primary", True)
         self._scan.clicked.connect(self.scan)
-        self._all_on = QPushButton("All on")
-        self._all_off = QPushButton("All off")
+        self._all_on = QPushButton("Turn all on")
+        self._all_off = QPushButton("Turn all off")
         self._all_on.clicked.connect(lambda: self.set_all_power(True))
         self._all_off.clicked.connect(lambda: self.set_all_power(False))
         self._tabs = SideTabs()
         header = QHBoxLayout()
         self._logo = QLabel()
-        self._logo.setFixedSize(42, 42)
+        self._logo.setFixedSize(t.TARGET, t.TARGET)
         header.addWidget(self._logo)
         headings = QVBoxLayout()
-        headings.setSpacing(3)
-        title = QLabel("Your plugs")
-        title.setProperty("role", "title")
-        subtitle = QLabel("Local control, at a glance.")
-        subtitle.setProperty("tone", "muted")
-        headings.addWidget(title)
-        headings.addWidget(subtitle)
+        headings.setSpacing(t.SP_XS)
+        self._title = QLabel()
+        self._title.setProperty("role", "title")
+        self._subtitle = QLabel()
+        self._subtitle.setProperty("tone", "muted")
+        headings.addWidget(self._title)
+        headings.addWidget(self._subtitle)
         header.addLayout(headings, 1)
         header.addWidget(self._scan)
-        self._tabs.content.setContentsMargins(24, 18, 24, 8)
+        self._tabs.content.setContentsMargins(t.SP_XL, t.SP_LG, t.SP_XL, t.SP_SM)
         self._tabs.content.insertLayout(0, header)
         devices = QWidget()
         devices_layout = QVBoxLayout(devices)
-        devices_layout.setContentsMargins(0, 14, 0, 0)
-        devices_layout.setSpacing(10)
+        devices_layout.setContentsMargins(0, t.PAGE_TOP, 0, 0)
+        devices_layout.setSpacing(t.SP_MD)
         toolbar = QHBoxLayout()
         self._count = QLabel("DEVICES · 0 plugs")
         self._count.setProperty("tone", "muted")
@@ -139,7 +149,7 @@ class MainWindow(QMainWindow):
         chart_box = QWidget()
         chart_layout = QVBoxLayout(chart_box)
         chart_layout.setContentsMargins(0, 0, 0, 0)
-        chart_layout.setSpacing(6)
+        chart_layout.setSpacing(t.SP_SM)
         chart_head = QHBoxLayout()
         self._chart_note = QLabel()
         self._chart_note.setProperty("tone", "muted")
@@ -165,6 +175,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._login, "account", "Account", bottom=True)
         self._tabs.addTab(self._settings, "settings", "Settings")
         self._tabs.currentChanged.connect(self._tab_changed)
+        self._show_page(self._tabs.currentIndex())
         self.setCentralWidget(self._tabs)
         self.setMinimumSize(760, 640)
         self.resize(920, 900)
@@ -191,9 +202,9 @@ class MainWindow(QMainWindow):
         self._tray = QSystemTrayIcon(power_icon(self._theme.colors.accent), self)
         menu = QMenu(self)
         for text, slot in (
-            ("Show", self._show_from_tray),
-            ("All on", lambda: self.set_all_power(True)),
-            ("All off", lambda: self.set_all_power(False)),
+            ("Show", self.show_window),
+            ("Turn all on", lambda: self.set_all_power(True)),
+            ("Turn all off", lambda: self.set_all_power(False)),
             ("Quit", QApplication.quit),
         ):
             action = QAction(text, menu)
@@ -202,11 +213,11 @@ class MainWindow(QMainWindow):
         self._tray.setContextMenu(menu)
         self._tray.setToolTip("TapoControl")
         self._tray.activated.connect(
-            lambda reason: self._show_from_tray() if reason == QSystemTrayIcon.ActivationReason.Trigger else None
+            lambda reason: self.show_window() if reason == QSystemTrayIcon.ActivationReason.Trigger else None
         )
         self._tray.show()
 
-    def _show_from_tray(self) -> None:
+    def show_window(self) -> None:
         self.showNormal()
         self.raise_()
         self.activateWindow()
@@ -249,12 +260,14 @@ class MainWindow(QMainWindow):
 
     def prompt_login(self, message: str = "") -> None:
         self._auth_required = True
+        self._signing_in = False
+        self._scanning = False
         self._timer.stop()
         self._history.clear()
         self._login.set_message(message)
         self._login.password.clear()
         self._tabs.setCurrentWidget(self._login)
-        self._show_from_tray()
+        self.show_window()
         (self._login.password if self._login.email.text() else self._login.email).setFocus()
         self._render()
 
@@ -272,11 +285,13 @@ class MainWindow(QMainWindow):
         self._power_pending.clear()
         self._power_confirming.clear()
         self._history.clear()
+        self._scanning = False
         self._energy.clear()
         self._overview_fetched.clear()
         self._auth_required = False
         self._login.password.clear()
-        self._login.set_message("Account saved.", error=False)
+        self._signing_in = True
+        self._login.set_message("Account saved. Checking it with Tapo…", error=False)
         self._tabs.setCurrentIndex(0)
         self._timer.start()
         self._render()
@@ -288,7 +303,9 @@ class MainWindow(QMainWindow):
     def scan(self) -> None:
         if not self._can_send():
             return
-        self.statusBar().showMessage("Scanning...")
+        self._scanning = True
+        self._render()
+        self.statusBar().showMessage("Scanning the network…")
         self._submit(self._controller.discover(), self._on_scanned)
 
     def _submit(self, coro: Coroutine[Any, Any, Any], callback: Callable) -> None:
@@ -427,6 +444,8 @@ class MainWindow(QMainWindow):
     def set_all_power(self, on: bool) -> None:
         if not self._can_send():
             return
+        if self._devices:
+            self.statusBar().showMessage(f"Turning {len(self._devices)} plug(s) {'on' if on else 'off'}…", 5000)
         for ip in self._devices:
             self._submit(self._controller.set_power(ip, on), self._on_toggled)
 
@@ -455,7 +474,15 @@ class MainWindow(QMainWindow):
         else:
             self._history.clear()
 
+    def _show_page(self, index: int) -> None:
+        """The header names the open page, so the icon rail is never the only orientation."""
+        kind = self._tabs.kind(index)
+        self._title.setText(PAGES[kind][0])
+        self._subtitle.setText(PAGES[kind][1])
+        self._scan.setVisible(kind in ("overview", "devices"))
+
     def _tab_changed(self, index: int) -> None:
+        self._show_page(index)
         page = self._tabs.widget(index)
         if page is self._history:
             self._load_history()
@@ -473,7 +500,9 @@ class MainWindow(QMainWindow):
         self._render_cards()
 
     def _on_scanned(self, devices: list[DeviceInfo] | None, error: BaseException | None) -> None:
+        self._scanning = False
         if error:
+            self._render()
             return self._on_error(error)
         self._store.save_devices(devices)
         self._devices = {d.ip: d for d in self._store.devices()}
@@ -498,6 +527,9 @@ class MainWindow(QMainWindow):
             self._maybe_rescan(ip)
         elif state:
             self._failures.pop(ip, None)
+            if self._signing_in:  # the first answer from a plug confirms the login
+                self._signing_in = False
+                self._login.set_message("Signed in. Your plugs are connected.", error=False)
             self._state[ip] = state
             now = time.time()
             self._samples.setdefault(ip, deque(maxlen=SAMPLES)).append(state[1])
@@ -533,7 +565,8 @@ class MainWindow(QMainWindow):
             if not self._auth_required:
                 self.prompt_login("Login failed. Check your Tapo email and password.")
         else:
-            self.statusBar().showMessage(f"Error: {error}", 8000)
+            self.statusBar().showMessage(action_error(error))  # stays until the next message, so it is not missed
+            self.statusBar().setToolTip(str(error))
 
     def _render(self) -> None:
         selected = self._selected_ip()
@@ -573,7 +606,8 @@ class MainWindow(QMainWindow):
         cost = f" · {total / 1000 * price:.2f} / h" if price else ""
         self._count.setText(f"DEVICES · {len(self._devices)} plugs · {online} online · {total:.1f} W now{cost}")
         enabled = self._controller is not None and not self._auth_required
-        self._scan.setEnabled(enabled)
+        self._scan.setEnabled(enabled and not self._scanning)
+        self._scan.setText("Scanning…" if self._scanning else "Scan network")
         self._all_on.setEnabled(enabled and bool(self._devices))
         self._all_off.setEnabled(enabled and bool(self._devices))
         if self._history.set_names({ip: d.alias for ip, d in self._devices.items()}):

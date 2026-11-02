@@ -267,8 +267,8 @@ def test_tab_energy_actions_and_live_theme_changes(window):
     w._chart.show_samples([1.0, 2.0], "x")
     for scheme in (Qt.ColorScheme.Dark, Qt.ColorScheme.Light):
         theme().apply(scheme)
-        assert w._chart._lines[0].pen().color().name() == theme().colors.accent
-        assert w._history._chart._series[0].pen().color().name() == theme().colors.accent
+        assert w._chart._lines[0].pen().color().name() == theme().colors.text
+        assert w._history._chart._series[0].pen().color().name() == theme().colors.text
 
 
 def test_card_rename_and_all_power_keep_existing_actions(window, monkeypatch):
@@ -291,7 +291,7 @@ def test_close_hides_to_tray_and_show_restores(window, app):
     w.closeEvent(event)
     assert not event.isAccepted()
     assert not w.isVisible()
-    w._show_from_tray()
+    w.show_window()
     assert w.isVisible()
 
 
@@ -349,12 +349,12 @@ def test_chart_toggles_hide_lines_but_overall_still_sums_every_plug(window):
     w, runner, _ = window
     w._window.setCurrentIndex(1)
     runner.finish()
-    colors = dict(w._colors._colors)
+    colors = dict(w._colors._slots)
     assert len(colors) == 2 and len(set(colors.values())) == 2
     w._toggles._boxes["192.168.1.2"].setChecked(False)
     assert w._chart._names == ["Overall", "Lamp"]
     assert [v for _, v in w._chart._points[0]] == [60.0, 80.0]
-    assert w._colors._colors == colors  # the others keep their colors
+    assert w._colors._slots == colors  # the others keep their colors
     w._toggles._boxes["overall"].setChecked(False)
     assert w._chart._names == ["Lamp"]
     w._toggles._boxes["192.168.1.2"].setChecked(True)
@@ -366,7 +366,7 @@ def test_chart_hover_lists_every_line_at_the_cursor():
 
     chart = LiveChart(120)
     now = time.time()
-    chart.show_lines([Line("A", [now - 5], [1.0]), Line("B", [now - 6], [2.0], "#ff0000")], "x")
+    chart.show_lines([Line("A", [now - 5], [1.0]), Line("B", [now - 6], [2.0], 0)], "x")
     rows = chart._rows_at(chart._slot(now - 5))
     assert [(i, v) for i, _, v in rows] == [(0, 1.0), (1, 2.0)]
 
@@ -483,7 +483,8 @@ def test_side_tabs_switch_pages_and_report_changes(app):
     assert tabs.currentWidget() is second and seen == [1] and tabs._buttons[1].isChecked()
     tabs.setCurrentWidget(second)  # already open: no change signal
     assert seen == [1] and tabs.widget(0) is first
-    assert tabs._buttons[0].toolTip() == "Overview" and not tabs._buttons[0].icon().isNull()
+    assert tabs._buttons[0].toolTip() == "Overview (Ctrl+1)" and tabs._buttons[0].accessibleName() == "Overview"
+    assert not tabs._buttons[0].icon().isNull() and tabs.kind(1) == "settings"
 
 
 def test_overview_shows_totals_and_fetches_once_a_minute(window):
@@ -506,3 +507,50 @@ def test_overview_shows_totals_and_fetches_once_a_minute(window):
     w._overview_fetched.clear()
     w.refresh()
     assert not any(c[0] == "energy" for c in controller.calls)  # nothing fetched while the Overview is closed
+
+
+def test_header_names_the_open_page_and_scan_belongs_to_plug_pages(window):
+    w, _, _ = window
+    seen = {}
+    for index in range(5):
+        w._tabs.setCurrentIndex(index)
+        seen[w._tabs.kind(index)] = (w._title.text(), w._scan.isHidden())
+    assert seen == {
+        "overview": ("Overview", False), "devices": ("Devices", False), "energy": ("Energy", True),
+        "account": ("Account", True), "settings": ("Settings", True),
+    }
+
+
+def test_scan_shows_pending_state_and_recovers_on_failure(window):
+    w, runner, _ = window
+    w.scan()
+    assert w._scan.text() == "Scanning…" and not w._scan.isEnabled()
+    w._render()  # the 5 second refresh must not re-enable it while the scan runs
+    assert not w._scan.isEnabled()
+    runner.pending[-1][1](None, TimeoutError("slow"))
+    assert w._scan.text() == "Scan network" and w._scan.isEnabled()
+    assert "did not answer in time" in w.statusBar().currentMessage()  # plain words, kept until replaced
+
+
+def test_login_confirms_only_after_a_plug_answers(window, monkeypatch):
+    w, runner, _ = window
+    monkeypatch.setattr(keyring, "set_password", lambda *_: None)
+    w._login.email.setText("test@example.invalid")
+    w._login.password.setText("fake-password")
+    w._login._accept()
+    assert "Checking" in w._login._message.text()  # saved, not yet confirmed
+    runner.finish()
+    assert w._login._message.text().startswith("Signed in")
+
+
+def test_toggle_swatches_follow_the_theme(app):
+    from ui.charts import LineColors, LineToggles
+    from ui.theme import DARK, LIGHT
+
+    toggles = LineToggles(LineColors())
+    toggles.set_plugs([("a", "Desk")])
+    seen = []
+    for scheme in (Qt.ColorScheme.Dark, Qt.ColorScheme.Light):
+        theme().apply(scheme)
+        seen.append(toggles._boxes["overall"].icon().pixmap(12, 12).toImage().pixelColor(6, 6).name())
+    assert seen == [DARK.text, LIGHT.text]  # the overall wears the text color on each theme

@@ -1,8 +1,9 @@
 """A left rail of icon buttons beside a stack of pages: a QTabWidget stand-in with the same calls."""
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QPolygonF, QShortcut
 from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QStackedWidget, QToolButton, QVBoxLayout, QWidget
 
+from ui import tokens as t
 from ui.theme import theme
 
 ICON_SIZES = (24, 32, 48)
@@ -58,10 +59,10 @@ class SideTabs(QWidget):
         super().__init__()
         self._rail = QFrame()
         self._rail.setObjectName("Rail")
-        self._rail.setFixedWidth(68)
+        self._rail.setFixedWidth(48 + 2 * t.SP_LG + 1)  # a button, a margin each side and the border
         self._rail_layout = QVBoxLayout(self._rail)
-        self._rail_layout.setContentsMargins(10, 14, 10, 14)
-        self._rail_layout.setSpacing(6)
+        self._rail_layout.setContentsMargins(t.SP_LG, t.SP_LG, t.SP_LG, t.SP_LG)
+        self._rail_layout.setSpacing(t.SP_SM)
         self._stack = QStackedWidget()
         self._buttons: list[QToolButton] = []
         self._kinds: list[str] = []
@@ -69,7 +70,7 @@ class SideTabs(QWidget):
         self._group = QButtonGroup(self)
         self._group.idClicked.connect(self.setCurrentIndex)
         self.content = QVBoxLayout()
-        self.content.setSpacing(16)
+        self.content.setSpacing(t.SP_LG)
         self.content.addWidget(self._stack, 1)
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
@@ -84,9 +85,11 @@ class SideTabs(QWidget):
         button = QToolButton()
         button.setProperty("nav", True)
         button.setCheckable(True)
-        button.setToolTip(label)
+        button.setToolTip(f"{label} (Ctrl+{index + 1})")
         button.setAccessibleName(label)
+        QShortcut(QKeySequence(f"Ctrl+{index + 1}"), self, activated=lambda: self.setCurrentIndex(index))
         button.setFixedSize(48, 48)
+        button.setFocusPolicy(Qt.FocusPolicy.TabFocus)  # a keyboard ring, never a leftover from a mouse click
         button.setIconSize(QSize(26, 26))
         self._group.addButton(button, index)
         if bottom and not self._bottom:
@@ -113,6 +116,9 @@ class SideTabs(QWidget):
 
     def setCurrentWidget(self, page: QWidget) -> None:
         self.setCurrentIndex(self._stack.indexOf(page))
+
+    def kind(self, index: int) -> str:
+        return self._kinds[index]
 
     def currentIndex(self) -> int:
         return self._stack.currentIndex()

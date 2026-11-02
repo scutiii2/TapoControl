@@ -1,8 +1,9 @@
 """Overview tab: the headline numbers across all plugs and today's usage by hour."""
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
+from ui import tokens as t
 from ui.charts import OVERALL, LineColors, LineToggles, UsageChart, UsageLine
-from ui.widgets import metric_card
+from ui.widgets import cost_line, metric_card
 
 
 class OverviewPage(QWidget):
@@ -20,11 +21,14 @@ class OverviewPage(QWidget):
         self._toggles.changed.connect(self._render_chart)
         self._chart = UsageChart()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 14, 0, 0)
-        layout.setSpacing(12)
+        layout.setContentsMargins(0, t.PAGE_TOP, 0, 0)
+        layout.setSpacing(t.SP_LG)
         layout.addLayout(cards)
-        layout.addWidget(self._toggles)
-        layout.addWidget(self._chart, 1)
+        chart = QVBoxLayout()  # the toggles belong to the chart, so they sit closer to it than to the cards
+        chart.setSpacing(t.SP_SM)
+        chart.addWidget(self._toggles)
+        chart.addWidget(self._chart, 1)
+        layout.addLayout(chart, 1)
 
     def set_plugs(self, names: dict[str, str]) -> None:
         """Follow the plug list; forget hours of plugs that are gone."""
@@ -43,7 +47,7 @@ class OverviewPage(QWidget):
     def show_energy(self, today_wh: int | None, month_wh: int | None, price: float) -> None:
         for value, cost, wh in ((self._today, self._today_cost, today_wh), (self._month, self._month_cost, month_wh)):
             value.setText("—" if wh is None else f"{wh / 1000:.2f} kWh")
-            cost.setText("Estimated cost —" if wh is None else f"Estimated cost {wh / 1000 * price:.2f}")
+            cost.setText("Estimated cost —" if wh is None else cost_line(wh, price, "Set a tariff in Energy for cost"))
 
     def set_hours(self, ip: str, hours: list[int]) -> None:
         if ip in self._names:

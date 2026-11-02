@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui import tokens as t
 from ui.theme import theme
 
 
@@ -121,7 +122,7 @@ class PlugCard(QFrame):
         self.setMinimumHeight(80)
         self._on = False
         self._name = ElidedLabel()
-        self._name.setStyleSheet("font-size: 15px; font-weight: 600;")
+        self._name.setStyleSheet(f"font-size: {t.FONT_NAME}px; font-weight: 600;")
         self._address = ip
         self._ip = QLabel(ip)
         self._ip.setProperty("tone", "muted")
@@ -131,7 +132,7 @@ class PlugCard(QFrame):
         self._watts = QLabel()
         self._watts.setFixedWidth(90)
         self._watts.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._watts.setStyleSheet("font-size: 21px; font-weight: 600;")
+        self._watts.setStyleSheet(f"font-size: {t.FONT_VALUE}px; font-weight: 600;")
         self._cost = QLabel()
         self._cost.setFixedWidth(90)
         self._cost.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -154,13 +155,13 @@ class PlugCard(QFrame):
         self._menu.setToolTip("Rename, energy or timer")
         self._menu.setMenu(menu)
         self._menu.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._menu.setFixedSize(36, 34)
+        self._menu.setFixedSize(t.TARGET, t.TARGET)
         self._menu.setStyleSheet("padding: 0; font-size: 20px;")
         row = QHBoxLayout(self)
-        row.setContentsMargins(18, 12, 12, 12)
-        row.setSpacing(16)
+        row.setContentsMargins(t.SP_LG, t.SP_MD, t.SP_MD, t.SP_MD)
+        row.setSpacing(t.SP_LG)
         labels = QVBoxLayout()
-        labels.setSpacing(4)
+        labels.setSpacing(t.SP_XS)
         labels.addWidget(self._name)
         labels.addWidget(self._ip)
         row.addLayout(labels, 1)
