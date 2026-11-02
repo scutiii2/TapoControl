@@ -2,7 +2,7 @@
 import asyncio
 import functools
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from kasa import Discover
 from tapo import ApiClient
@@ -19,6 +19,18 @@ class AuthError(Exception):
 class EnergySummary:
     today_wh: int
     month_wh: int
+    today_minutes: int = 0  # time the plug was on
+    month_minutes: int = 0
+
+
+@dataclass(frozen=True)
+class UsageSummary:
+    """Plug-reported totals over the last 7 and 30 days."""
+
+    wh_7d: int
+    wh_30d: int
+    minutes_7d: int
+    minutes_30d: int
 
 
 def quarter_start(day: date) -> date:
@@ -131,7 +143,24 @@ class TapoController:
     @_mapped
     async def energy(self, ip: str) -> EnergySummary:
         usage = await self._call(ip, lambda plug: plug.get_energy_usage())
-        return EnergySummary(int(usage.today_energy), int(usage.month_energy))
+        return EnergySummary(
+            int(usage.today_energy), int(usage.month_energy),
+            int(usage.today_runtime or 0), int(usage.month_runtime or 0),
+        )
+
+    @_mapped
+    async def usage(self, ip: str) -> UsageSummary:
+        u = await self._call(ip, lambda plug: plug.get_device_usage())
+        return UsageSummary(
+            int(u.power_usage.past7), int(u.power_usage.past30), int(u.time_usage.past7), int(u.time_usage.past30)
+        )
+
+    @_mapped
+    async def hourly_today(self, ip: str) -> list[int]:
+        """Wh per hour since midnight, one entry per elapsed hour including the current one."""
+        now = datetime.now()
+        data = await self._call(ip, lambda plug: plug.get_energy_data(EnergyDataInterval.Hourly, now.date(), now.date()))
+        return [int(wh) for wh in data.entries][: now.hour + 1]
 
     @_mapped
     async def daily_history(self, ip: str) -> list[tuple[date, int]]:

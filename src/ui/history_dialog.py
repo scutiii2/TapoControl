@@ -5,13 +5,18 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from core.async_runner import AsyncRunner
-from core.controller import AuthError, EnergySummary, TapoController, monthly_totals, quarter_start
+from core.controller import AuthError, EnergySummary, TapoController, UsageSummary, monthly_totals, quarter_start
 from core.store import Store
 from ui.charts import DailyBars
 from ui.theme import energy_error, theme
 
 
-RANGES = ("This quarter", "Last 12 months", "All time")
+RANGES = ("Today by hour", "This quarter", "Last 12 months", "All time")
+HOURLY, QUARTER, YEAR, ALL = range(4)
+
+
+def fmt_minutes(minutes: int) -> str:
+    return f"{minutes // 60} h {minutes % 60:02d} m"
 
 
 class HistoryPanel(QWidget):
@@ -53,11 +58,16 @@ class HistoryPanel(QWidget):
         self._range = QComboBox()
         self._range.addItems(RANGES)
         self._range.setAccessibleName("History range")
-        self._range.currentIndexChanged.connect(self._render_history)
+        self._range.setCurrentIndex(QUARTER)
+        self._range.currentIndexChanged.connect(self._range_changed)
         header.addWidget(self._range)
         totals = QHBoxLayout()
         self._today, self._today_cost = self._total_card(totals, "TODAY")
         self._month, self._month_cost = self._total_card(totals, "THIS MONTH")
+        self._runtime, self._runtime_month = self._total_card(totals, "ON TODAY")
+        self._usage = QLabel()
+        self._usage.setProperty("tone", "muted")
+        self._usage.setWordWrap(True)
         self._summary_error = self._error_label()
         self._history_error = self._error_label()
         self._bars = DailyBars()
@@ -69,6 +79,7 @@ class HistoryPanel(QWidget):
         layout.setSpacing(16)
         layout.addLayout(header)
         layout.addLayout(totals)
+        layout.addWidget(self._usage)
         layout.addWidget(self._summary_error)
         layout.addWidget(self._bars, 1)
         layout.addWidget(self._history_error)
@@ -116,6 +127,10 @@ class HistoryPanel(QWidget):
         self._today_cost.setText("Estimated cost —")
         self._month_cost.setText("Estimated cost —")
         self._rows = []
+        self._hours: list[int] = []
+        self._runtime.setText("—")
+        self._runtime_month.setText("This month —")
+        self._usage.setText("")
         self._bars.show_rows([])
         self._summary_error.hide()
         self._history_error.hide()
@@ -144,7 +159,12 @@ class HistoryPanel(QWidget):
             if revision == self._revision:
                 self._on_history(result, error)
 
+        def usage(result, error):
+            if revision == self._revision:
+                self._on_usage(result, error)
+
         self._runner.submit(controller.energy(ip), summary)
+        self._runner.submit(controller.usage(ip), usage)
         # One-off backfill of every quarter the plug remembers; afterwards the current quarter is enough.
         self._backfilling = not self._store.backfilled(ip)
         self._runner.submit(controller.full_history(ip) if self._backfilling else controller.daily_history(ip), history)
@@ -159,6 +179,32 @@ class HistoryPanel(QWidget):
             self._month.setText(f"{s.month_wh / 1000:.2f} kWh")
             self._today_cost.setText(f"Estimated cost {self._cost(s.today_wh)}")
             self._month_cost.setText(f"Estimated cost {self._cost(s.month_wh)}")
+            self._runtime.setText(fmt_minutes(s.today_minutes))
+            self._runtime_month.setText(f"This month {fmt_minutes(s.month_minutes)}")
+
+    def _on_usage(self, usage: UsageSummary | None, error: BaseException | None) -> None:
+        if error:  # secondary info: stay quiet unless the login is bad
+            if isinstance(error, AuthError):
+                self.auth_failed.emit(error)
+            return
+        self._usage.setText(
+            f"Last 7 days: {usage.wh_7d / 1000:.2f} kWh · on {fmt_minutes(usage.minutes_7d)}      "
+            f"Last 30 days: {usage.wh_30d / 1000:.2f} kWh · on {fmt_minutes(usage.minutes_30d)}"
+        )
+
+    def _range_changed(self) -> None:
+        if self._range.currentIndex() == HOURLY and self._controller and self._ip:
+            revision = self._revision
+
+            def hours(result, error):
+                if revision == self._revision:
+                    self._hours = result or []
+                    if error:
+                        self._show_error(self._history_error, error)
+                    self._render_history()
+
+            self._runner.submit(self._controller.hourly_today(self._ip), hours)
+        self._render_history()
 
     def _on_price(self, value: float) -> None:
         self._store.set_price_per_kwh(value)
@@ -190,11 +236,15 @@ class HistoryPanel(QWidget):
             return
         choice = self._range.currentIndex()
         rows = self._rows
-        if choice == 0:
+        if choice == HOURLY:
+            rows = list(enumerate(self._hours))
+        elif choice == QUARTER:
             rows = [r for r in rows if r[0] >= quarter_start(date.today())]
-        elif choice == 1:
+        elif choice == YEAR:
             rows = [r for r in rows if r[0] >= (date.today().replace(day=1) - timedelta(days=335)).replace(day=1)]
-        self._bars.show_rows(monthly_totals(rows) if choice else rows, monthly=bool(choice))
+        if choice in (YEAR, ALL):
+            rows = monthly_totals(rows)
+        self._bars.show_rows(rows, kind={HOURLY: "hour", QUARTER: "day"}.get(choice, "month"))
         self._empty.setText("No energy data is available for this plug yet.")
         self._empty.setVisible(not rows and not self._history_error.isVisible())
 

@@ -1,5 +1,5 @@
 import asyncio
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace as NS
 
 import pytest
@@ -32,10 +32,13 @@ class FakePlug:
         return NS(current_power=12)
 
     async def get_energy_usage(self):
-        return NS(today_energy=150, month_energy=4200)
+        return NS(today_energy=150, month_energy=4200, today_runtime=90, month_runtime=600)
 
-    async def get_energy_data(self, interval, start_date):
+    async def get_energy_data(self, interval, start_date, end_date=None):
         return NS(entries=[100, 200], start_date_time=start_date)
+
+    async def get_device_usage(self):
+        return NS(power_usage=NS(today=1, past7=700, past30=3000), time_usage=NS(today=2, past7=300, past30=1200))
 
 
 class FakeClient:
@@ -120,7 +123,7 @@ def test_full_history_walks_back_quarters_and_stops_at_empty():
     last_q = previous_quarter(this_q)
 
     class Plug(FakePlug):
-        async def get_energy_data(self, interval, start_date):
+        async def get_energy_data(self, interval, start_date, end_date=None):
             entries = {this_q: [10, 20, 30], last_q: [0, 0, 5, 6]}.get(start_date, [0] * 90)
             return NS(entries=entries, start_date_time=start_date)
 
@@ -132,7 +135,7 @@ def test_full_history_walks_back_quarters_and_stops_at_empty():
 
 def test_full_history_keeps_current_quarter_when_older_fails():
     class Plug(FakePlug):
-        async def get_energy_data(self, interval, start_date):
+        async def get_energy_data(self, interval, start_date, end_date=None):
             if start_date != quarter_start(date.today()):
                 raise Exception("no data")
             return NS(entries=[10], start_date_time=start_date)
@@ -145,3 +148,12 @@ def test_monthly_totals_and_trim():
     assert monthly_totals(rows) == [(date(2026, 1, 1), 3), (date(2026, 2, 1), 4)]
     assert trim_leading_zeros([(date(2026, 1, 1), 0), (date(2026, 1, 2), 5), (date(2026, 1, 3), 0)]) == [
         (date(2026, 1, 2), 5), (date(2026, 1, 3), 0)]
+
+
+def test_energy_runtime_usage_and_hourly():
+    c = controller()
+    e = asyncio.run(c.energy("1.1.1.1"))
+    assert (e.today_minutes, e.month_minutes) == (90, 600)
+    u = asyncio.run(c.usage("1.1.1.1"))
+    assert (u.wh_7d, u.wh_30d, u.minutes_7d, u.minutes_30d) == (700, 3000, 300, 1200)
+    assert asyncio.run(c.hourly_today("1.1.1.1")) == [100, 200][: datetime.now().hour + 1]

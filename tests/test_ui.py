@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication
 
-from core.controller import AuthError, EnergySummary
+from core.controller import AuthError, EnergySummary, UsageSummary
 from core.store import DeviceInfo, Store
 from ui.main_window import MainWindow
 from ui.theme import theme
@@ -36,6 +36,14 @@ class FakeController:
     async def energy(self, ip):
         self.calls.append(("energy", ip))
         return EnergySummary(420, 12680)
+
+    async def usage(self, ip):
+        self.calls.append(("usage", ip))
+        return UsageSummary(700, 3000, 300, 1200)
+
+    async def hourly_today(self, ip):
+        self.calls.append(("hourly", ip))
+        return [5, 0, 7]
 
     async def daily_history(self, ip):
         self.calls.append(("history", ip))
@@ -281,7 +289,11 @@ def test_energy_history_is_stored_and_range_switches_to_monthly(window):
     runner.finish()
     assert w._store.backfilled("192.168.1.2")
     assert w._store.daily("192.168.1.2") == [(date(2026, 11, 1), 420)]
-    panel._range.setCurrentIndex(2)
-    assert panel._bars._monthly
+    panel._range.setCurrentIndex(3)
+    assert panel._bars._kind == "month"
+    panel._range.setCurrentIndex(0)
+    runner.finish()
+    assert panel._bars._kind == "hour" and panel._bars._rows == [(0, 5), (1, 0), (2, 7)]
+    assert "Last 7 days: 0.70 kWh" in panel._usage.text()
     panel.load(controller, "192.168.1.2", "Desk")  # second open: stored rows still shown
     assert panel._rows == []  # cleared until the plug answers

@@ -145,7 +145,7 @@ class DailyBars(QChartView):
         self.chart().setMargins(QMargins(8, 4, 16, 30))
         self.setMinimumHeight(250)
         self._rows: list[tuple[date, int]] = []
-        self._monthly = False
+        self._kind = "day"
         self._bars = QBarSet("kWh")
         self._bars.hovered.connect(self._on_hover)
         series = QBarSeries()
@@ -167,10 +167,18 @@ class DailyBars(QChartView):
 
     def _on_hover(self, hovering: bool, index: int) -> None:
         if hovering and index < len(self._rows):
-            day, wh = self._rows[index]
-            QToolTip.showText(QCursor.pos(), f"{day.strftime('%B %Y' if self._monthly else '%a %d %b')} · {wh / 1000:.2f} kWh", self)
+            key, wh = self._rows[index]
+            QToolTip.showText(QCursor.pos(), f"{self._label(key, tooltip=True)} · {wh / 1000:.2f} kWh", self)
         else:
             QToolTip.hideText()
+
+    def _label(self, key, tooltip: bool = False) -> str:
+        """`key` is a date, or an hour number for the hourly view."""
+        if self._kind == "hour":
+            return f"{key:02d}:00"
+        if self._kind == "month":
+            return key.strftime("%B %Y" if tooltip else "%b %Y")
+        return key.strftime("%a %d %b" if tooltip else "%d %b")
 
     def _apply_theme(self) -> None:
         style_chart(self)
@@ -178,16 +186,17 @@ class DailyBars(QChartView):
         self._bars.setBorderColor(QColor(theme().colors.accent))
         self.viewport().update()
 
-    def show_rows(self, rows: list[tuple[date, int]], monthly: bool = False) -> None:
+    def show_rows(self, rows: list[tuple[date | int, int]], kind: str = "day") -> None:
+        """kind: "day" / "month" rows are (date, Wh); "hour" rows are (hour, Wh)."""
         self._rows = list(rows)
-        self._monthly = monthly
-        self.chart().setTitle("Monthly usage" if monthly else "Daily usage")
+        self._kind = kind
+        self.chart().setTitle({"day": "Daily usage", "month": "Monthly usage", "hour": "Usage today by hour"}[kind])
         if self._bars.count():
             self._bars.remove(0, self._bars.count())
         self._x.clear()
         if rows:
             self._bars.append([wh / 1000 for _, wh in rows])
-            self._x.append([d.isoformat() for d, _ in rows])
+            self._x.append([str(k) for k, _ in rows])
         self._y.setRange(0, max((wh for _, wh in rows), default=0) / 1000 * 1.2 or 1)
         self._apply_theme()
 
@@ -205,6 +214,6 @@ class DailyBars(QChartView):
         painter.setFont(QFont("Segoe UI", 9))
         for index in indices:
             x = area.left() + (index + 0.5) * area.width() / count
-            label = self._rows[index][0].strftime("%b %Y" if self._monthly else "%d %b")
+            label = self._label(self._rows[index][0])
             painter.drawText(QRectF(x - 36, area.bottom() + 8, 72, 22), Qt.AlignmentFlag.AlignCenter, label)
         painter.restore()
