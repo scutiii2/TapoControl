@@ -41,3 +41,12 @@ def test_short_gap_gets_a_midpoint():
     estimates = fill_gaps([(MON, 70.0), (MON + 300, 50.0)], [], flat_profile(MON, 60.0), 12.5)
     assert [t for t, _ in estimates] == [MON + 150]
     assert 55 < estimates[0][1] < 65  # between the two edge readings' shifts
+
+
+def test_total_series_sums_plugs_and_carries_a_reading_over_a_bucket_edge():
+    from core.profile import total_series
+
+    a = [(0.0, 10.0), (5.0, 10.0), (10.0, 10.0)]
+    b = [(0.2, 5.0), (5.6, 5.0), (10.0, 5.0)]  # b's second reading lands in the next bucket
+    assert [w for _, w in total_series([a, b], 5)] == [15.0, 15.0, 15.0]
+    assert total_series([[(0.0, 4.0)], [(0.0, 6.0), (100.0, 6.0)]], 5) == [(0.0, 10.0), (100.0, 6.0)]

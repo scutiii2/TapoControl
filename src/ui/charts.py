@@ -2,6 +2,7 @@
 import time
 from collections import deque
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date
 
 from PySide6.QtCharts import QBarCategoryAxis, QBarSeries, QBarSet, QChart, QChartView, QLineSeries, QValueAxis
@@ -49,8 +50,19 @@ def style_chart(view: QChartView) -> None:
         axis.setGridLinePen(QPen(QColor(colors.border), 0.5))
 
 
+@dataclass
+class Line:
+    """One series of the live chart: `times` are epoch seconds. `color` None means the theme accent."""
+
+    name: str
+    times: Sequence[float]
+    watts: Sequence[float]
+    color: str | None = None
+    estimates: Sequence[tuple[float, float]] = ()
+
+
 class LiveChart(QChartView):
-    """Watt samples of one plug over the last `max_samples` x SAMPLE_SECONDS."""
+    """Watt lines (one per plug, plus the overall) over the last `max_samples` x SAMPLE_SECONDS."""
 
     def __init__(self, max_samples: int):
         super().__init__(QChart())
@@ -64,10 +76,14 @@ class LiveChart(QChartView):
         self._x.setLabelsVisible(False)
         self._x.setGridLineVisible(False)
         self._max = max_samples
-        self._points: list[tuple[float, float]] = []  # (slot, watts); slot == max_samples is "now"
+        self._names: list[str] = []
+        self._colors: list[str | None] = []
+        self._points: list[list[tuple[float, float]]] = []  # per line: (slot, watts); slot == max_samples is "now"
         self._lines: list[QLineSeries] = []
+        self._line_colors: list[str | None] = []
         self._bridges: list[QLineSeries] = []
-        self._hover: int | None = None
+        self._bridge_colors: list[str | None] = []
+        self._hover: float | None = None  # slot under the cursor
         self._span = max_samples * SAMPLE_SECONDS
         self._gap_slots = GAP_SLOTS
         self.setMouseTracking(True)
@@ -82,54 +98,59 @@ class LiveChart(QChartView):
 
     def _apply_theme(self) -> None:
         style_chart(self)
-        for line in self._lines:
-            line.setPen(QPen(QColor(theme().colors.accent), 2.5))
-        for line in self._bridges:
-            pen = QPen(QColor(theme().colors.control), 1.5, Qt.PenStyle.DashLine)
-            line.setPen(pen)
+        colors = theme().colors
+        for line, color in zip(self._lines, self._line_colors, strict=True):
+            line.setPen(QPen(QColor(color or colors.accent), 2.5 if color is None else 2))
+        for line, color in zip(self._bridges, self._bridge_colors, strict=True):
+            line.setPen(QPen(QColor(color or colors.control), 1.5, Qt.PenStyle.DashLine))
 
     def show_samples(
         self, samples: deque[float] | None, title: str, times: Sequence[float] | None = None,
         span: float | None = None, interval: float = SAMPLE_SECONDS,
         estimates: Sequence[tuple[float, float]] = (),
     ) -> None:
-        """`times` are epoch seconds per sample; with them, gaps (app closed) show as gaps.
+        """One accent line; without `times` the samples are taken to end now, `interval` apart."""
+        samples = list(samples or ())
+        if times is None or len(times) != len(samples):
+            now = time.time()
+            times = [now - (len(samples) - 1 - i) * interval for i in range(len(samples))]
+        self.show_lines([Line("", times, samples, None, estimates)], title, span, interval)
 
-        `span` is the window in seconds (default: the live window); `interval` the normal spacing of samples.
-        `estimates` are (epoch seconds, watts) the plug stored itself; a gap's dashed line runs through those
-        points, or straight across when there are none.
+    def show_lines(
+        self, lines: Sequence[Line], title: str, span: float | None = None, interval: float = SAMPLE_SECONDS,
+    ) -> None:
+        """`span` is the window in seconds (default: the live window); `interval` the normal spacing of samples.
+
+        A gap (app closed) shows as a gap. A line's `estimates` are (epoch seconds, watts) points the plug
+        stored itself; its gap's dashed line runs through those, or straight across when there are none.
         """
         self._span = span or self._max * SAMPLE_SECONDS
         self._gap_slots = GAP_SLOTS * interval / self._span * self._max
-        samples = list(samples or ())
         self._hover = None
         self.chart().setTitle(title)
-        if times is not None and len(times) == len(samples):
-            now = time.time()
-            points = [(self._max - (now - t) / self._span * self._max, w) for t, w in zip(times, samples, strict=True)]
+        for series in self._lines + self._bridges:
+            self.chart().removeSeries(series)
+        self._lines, self._bridges, self._line_colors, self._bridge_colors = [], [], [], []
+        self._names, self._colors, self._points = [line.name for line in lines], [line.color for line in lines], []
+        for line in lines:
+            points = [(self._slot(t), w) for t, w in zip(line.times, line.watts, strict=True)]
             points = [p for p in points if p[0] >= 0]
-        else:
-            offset = self._max - len(samples)
-            points = [(offset + i, w) for i, w in enumerate(samples)]
-        self._points = points
-        for line in self._lines + self._bridges:
-            self.chart().removeSeries(line)
-        self._lines, self._bridges = [], []
-        segments: list[list[tuple[float, float]]] = []
-        for point in points:
-            if segments and point[0] - segments[-1][-1][0] <= self._gap_slots:
-                segments[-1].append(point)
-            else:
-                segments.append([point])
-        for i, segment in enumerate(segments):
-            if i:  # dashed link over the gap: nothing was measured there
-                before, after = segments[i - 1][-1], segment[0]
-                inside = sorted(
-                    (x, w) for x, w in ((self._slot(t), w) for t, w in estimates) if before[0] < x < after[0]
-                )
-                self._add_line([before, *inside, after], self._bridges)
-            self._add_line(segment, self._lines)
-        peak = max((w for _, w in points), default=0)
+            self._points.append(points)
+            segments: list[list[tuple[float, float]]] = []
+            for point in points:
+                if segments and point[0] - segments[-1][-1][0] <= self._gap_slots:
+                    segments[-1].append(point)
+                else:
+                    segments.append([point])
+            for i, segment in enumerate(segments):
+                if i:  # dashed link over the gap: nothing was measured there
+                    before, after = segments[i - 1][-1], segment[0]
+                    inside = sorted(
+                        (x, w) for x, w in ((self._slot(t), w) for t, w in line.estimates) if before[0] < x < after[0]
+                    )
+                    self._add_line([before, *inside, after], self._bridges, self._bridge_colors, line.color)
+                self._add_line(segment, self._lines, self._line_colors, line.color)
+        peak = max((w for points in self._points for _, w in points), default=0)
         self._y.setRange(0, max(10.0, peak * 1.2))
         self._y.applyNiceNumbers()
         self._y.setLabelFormat("%.1f" if peak < 10 else "%.0f")
@@ -139,25 +160,40 @@ class LiveChart(QChartView):
     def _slot(self, ts: float) -> float:
         return self._max - (time.time() - ts) / self._span * self._max
 
-    def _add_line(self, points: list[tuple[float, float]], into: list[QLineSeries]) -> None:
+    def _add_line(
+        self, points: list[tuple[float, float]], into: list[QLineSeries], colors: list[str | None], color: str | None,
+    ) -> None:
         line = QLineSeries()
         line.append([QPointF(x, w) for x, w in points])
         self.chart().addSeries(line)
         line.attachAxis(self._x)
         line.attachAxis(self._y)
         into.append(line)
+        colors.append(color)
 
-    def _index_at(self, x: float) -> int | None:
+    def _slot_at(self, x: float) -> float | None:
+        """Slot of the reading nearest the cursor, over all lines."""
         area = self.chart().mapRectToScene(self.chart().plotArea())
-        if not self._points or not area.left() <= x <= area.right():
+        slots = [s for points in self._points for s, _ in points]
+        if not slots or not area.left() <= x <= area.right():
             return None
         slot = (x - area.left()) / area.width() * self._max
-        index = min(range(len(self._points)), key=lambda i: abs(self._points[i][0] - slot))
-        return index if abs(self._points[index][0] - slot) <= self._gap_slots else None
+        nearest = min(slots, key=lambda s: abs(s - slot))
+        return nearest if abs(nearest - slot) <= self._gap_slots else None
+
+    def _rows_at(self, slot: float) -> list[tuple[int, float, float]]:
+        """(line index, slot, watts) of each line's reading near `slot`."""
+        rows = []
+        for i, points in enumerate(self._points):
+            if points:
+                near = min(points, key=lambda p: abs(p[0] - slot))
+                if abs(near[0] - slot) <= self._gap_slots:
+                    rows.append((i, *near))
+        return rows
 
     def mouseMoveEvent(self, event) -> None:
         super().mouseMoveEvent(event)
-        self._hover = self._index_at(self.mapToScene(event.position().toPoint()).x())
+        self._hover = self._slot_at(self.mapToScene(event.position().toPoint()).x())
         self.viewport().update()
 
     def leaveEvent(self, event) -> None:
@@ -186,25 +222,44 @@ class LiveChart(QChartView):
             elif align == Qt.AlignmentFlag.AlignRight:
                 box.moveRight(x)
             painter.drawText(box, align | Qt.AlignmentFlag.AlignVCenter, label)
-        if self._hover is not None:
-            slot, value = self._points[self._hover]
-            x = area.left() + slot / self._max * area.width()
-            y = area.bottom() - value / (self._y.max() or 1) * area.height()
+        rows = self._rows_at(self._hover) if self._hover is not None else []
+        if rows:
+            x = area.left() + self._hover / self._max * area.width()
             painter.setPen(QPen(QColor(c.control), 1))
             painter.drawLine(QPointF(x, area.top()), QPointF(x, area.bottom()))
-            painter.setPen(QPen(QColor(c.surface), 2))
-            painter.setBrush(QColor(c.accent))
-            painter.drawEllipse(QPointF(x, y), 4.5, 4.5)
-            ago = round((self._max - slot) / self._max * self._span)
-            text = f"{value:.1f} W · {age_text(ago)}"
-            box = QRectF(0, 0, painter.fontMetrics().horizontalAdvance(text) + 16, 24)
-            box.moveTopLeft(QPointF(min(x + 10, area.right() - box.width()), max(area.top(), y - 34)))
+            for i, slot, value in rows:
+                color = QColor(self._color_of(i))
+                dot_x = area.left() + slot / self._max * area.width()
+                y = area.bottom() - value / (self._y.max() or 1) * area.height()
+                painter.setPen(QPen(QColor(c.surface), 2))
+                painter.setBrush(color)
+                painter.drawEllipse(QPointF(dot_x, y), 4.5, 4.5)
+            ago = round((self._max - self._hover) / self._max * self._span)
+            texts = [(self._color_of(i), f"{self._names[i]}  {value:.1f} W".strip()) for i, _, value in rows]
+            metrics = painter.fontMetrics()
+            head = age_text(ago)
+            width = max(metrics.horizontalAdvance(t) for t in [head, *(t for _, t in texts)]) + 34
+            box = QRectF(0, 0, width, 12 + 18 * (len(texts) + 1))
+            left_edge = x + 10 if x + 10 + box.width() <= area.right() else x - 10 - box.width()
+            box.moveTopLeft(QPointF(max(area.left(), left_edge), area.top() + 4))
             painter.setPen(QPen(QColor(c.border), 1))
             painter.setBrush(QColor(c.raised))
             painter.drawRoundedRect(box, 6, 6)
-            painter.setPen(QColor(c.text))
-            painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
+            painter.setPen(QColor(c.muted))
+            middle = Qt.AlignmentFlag.AlignVCenter
+            painter.drawText(QRectF(box.left() + 10, box.top() + 6, width - 20, 18), middle, head)
+            for n, (color, text) in enumerate(texts, 1):
+                top = box.top() + 6 + 18 * n
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(color))
+                painter.drawEllipse(QPointF(box.left() + 14, top + 9), 4, 4)
+                painter.setPen(QColor(c.text))
+                painter.drawText(QRectF(box.left() + 24, top, width - 30, 18), middle, text)
         painter.restore()
+
+    def _color_of(self, index: int) -> str:
+        """The line's own color; the overall (no color) wears the accent."""
+        return self._colors[index] or theme().colors.accent
 
 
 class DailyBars(QChartView):

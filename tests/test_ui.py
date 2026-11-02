@@ -324,7 +324,7 @@ def test_live_chart_breaks_line_over_gap_and_keeps_restored_samples():
     assert len(chart._lines) == 2  # app was closed between the second and third reading
     assert len(chart._bridges) == 1  # dashed link across that gap
     chart.show_samples([5.0], "x", [now - 900])  # older than the 10 minute window
-    assert chart._lines == [] and chart._points == []
+    assert chart._lines == [] and chart._points == [[]]
 
 
 def test_long_chart_window_fetches_plug_history_and_ignores_failure(window):
@@ -332,14 +332,41 @@ def test_long_chart_window_fetches_plug_history_and_ignores_failure(window):
     w._window.setCurrentIndex(1)  # last hour
     runner.finish()
     assert ("power", w._selected_ip(), 1) in controller.calls
-    assert len(w._chart._points) == 2
+    assert w._chart._names == ["Overall", "Desk", "Lamp"]
+    assert [w for _, w in w._chart._points[0]] == [60.0, 80.0]  # overall: both plugs summed
     assert "average watts" in w._chart.chart().title()
     ip = w._selected_ip()
     before = list(w._long[ip])
     w._long_fetched.clear()
     w._fetch_long()
     runner.pending[-1][1](None, RuntimeError("unsupported"))  # failure keeps what the chart already had
-    assert w._long[ip] == before and len(w._chart._points) == 2
+    assert w._long[ip] == before and len(w._chart._points[0]) == 2
+
+
+def test_chart_toggles_hide_lines_but_overall_still_sums_every_plug(window):
+    w, runner, _ = window
+    w._window.setCurrentIndex(1)
+    runner.finish()
+    colors = dict(w._line_colors)
+    assert len(colors) == 2 and len(set(colors.values())) == 2
+    w._set_line_shown("192.168.1.2", False)
+    assert w._chart._names == ["Overall", "Lamp"]
+    assert [v for _, v in w._chart._points[0]] == [60.0, 80.0]
+    assert w._line_colors == colors  # the others keep their colors
+    w._set_line_shown("overall", False)
+    assert w._chart._names == ["Lamp"]
+    w._set_line_shown("192.168.1.2", True)
+    assert w._chart._names == ["Desk", "Lamp"]
+
+
+def test_chart_hover_lists_every_line_at_the_cursor():
+    from ui.charts import Line, LiveChart
+
+    chart = LiveChart(120)
+    now = time.time()
+    chart.show_lines([Line("A", [now - 5], [1.0]), Line("B", [now - 6], [2.0], "#ff0000")], "x")
+    rows = chart._rows_at(chart._slot(now - 5))
+    assert [(i, v) for i, _, v in rows] == [(0, 1.0), (1, 2.0)]
 
 
 def test_gap_is_dashed_through_plug_estimates():

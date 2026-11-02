@@ -4,9 +4,10 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QHBoxLayout,
     QInputDialog,
@@ -27,9 +28,9 @@ from PySide6.QtWidgets import (
 from core.async_runner import AsyncRunner
 from core.alerts import AlertEngine
 from core.controller import AuthError, TapoController, merge_power
-from core.profile import fill_gaps
+from core.profile import fill_gaps, total_series
 from core.store import DeviceInfo, Store
-from ui.charts import LiveChart
+from ui.charts import Line, LiveChart
 from ui.history_dialog import HistoryPanel
 from ui.login_dialog import LoginPanel
 from ui.plug_card import PlugCard, timer_note
@@ -42,6 +43,15 @@ OFFLINE_RESCAN_AFTER = 3  # consecutive failed refreshes before looking for a ne
 RESCAN_COOLDOWN_S = 60
 WINDOWS = (("Last 10 minutes", 0), ("Last hour", 1), ("Last 24 hours", 24))  # label, hours of plug history
 LONG_REFRESH_S = 60
+OVERALL = "overall"  # chart toggle key for the sum of all plugs
+# one per plug, in order
+LINE_COLORS = ("#4c9aff", "#ff8a3d", "#3ddc97", "#e86ac9", "#f5c542", "#9b7bff", "#35c4d8", "#ff6b6b")
+
+
+def swatch(color: str) -> QIcon:
+    pixmap = QPixmap(12, 12)
+    pixmap.fill(QColor(color))
+    return QIcon(pixmap)
 
 
 class MainWindow(QMainWindow):
@@ -70,6 +80,10 @@ class MainWindow(QMainWindow):
         self._power_pending: set[str] = set()
         self._power_confirming: set[str] = set()
         self._cards: dict[str, PlugCard] = {}
+        self._hidden: set[str] = set()  # chart lines switched off: plug ips and OVERALL
+        self._line_colors: dict[str, str] = {}
+        self._toggle_names: tuple = ()
+        self._long_failed: set[str] = set()
 
         self._list = QListWidget()
         self._list.setSpacing(5)
@@ -147,6 +161,9 @@ class MainWindow(QMainWindow):
         chart_head.addWidget(self._chart_note, 1)
         chart_head.addWidget(self._window)
         chart_layout.addLayout(chart_head)
+        self._toggles = QHBoxLayout()
+        self._toggles.setSpacing(14)
+        chart_layout.addLayout(self._toggles)
         chart_layout.addWidget(self._chart, 1)
         splitter.addWidget(chart_box)
         splitter.setSizes([360, 260])
@@ -423,8 +440,6 @@ class MainWindow(QMainWindow):
 
     def _selection_changed(self, *_args) -> None:
         self._render_cards()
-        self._fetch_long()
-        self._render_chart()
 
     def _on_scanned(self, devices: list[DeviceInfo] | None, error: BaseException | None) -> None:
         if error:
@@ -566,56 +581,96 @@ class MainWindow(QMainWindow):
         return any(b - a > 2.5 * REFRESH_MS / 1000 for a, b in zip(times, times[1:], strict=False))
 
     def _fetch_long(self) -> None:
-        """Pull the plug's own 5-minute history for the selected plug when a long window is chosen."""
-        ip, hours = self._selected_ip(), self._window.currentData()
-        if not hours and ip is not None and self._has_gap(ip):
-            hours = 1  # the live view only needs the plug's averages to estimate across its gaps
-        if not hours or ip is None or not self._can_send():
+        """Pull each plug's own 5-minute history when a long window is chosen, or to estimate across live gaps."""
+        if not self._can_send():
             return
+        for ip in self._devices:
+            hours = self._window.currentData() or (1 if self._has_gap(ip) else 0)
+            if hours:
+                self._fetch_long_ip(ip, hours)
+
+    def _fetch_long_ip(self, ip: str, hours: int) -> None:
         last = self._long_fetched.get(ip)
         if last and last[0] == hours and time.monotonic() - last[1] < LONG_REFRESH_S:
             return
         self._long_fetched[ip] = (hours, time.monotonic())
 
         def done(result, error):
-            if ip != self._selected_ip():
-                return
-            self._chart_note.setToolTip(str(error) if error else "")
             if error or not result:
                 # Unsupported or failing history: the chart keeps our own readings plus the learned pattern.
-                self._chart_note.setText(
-                    "The plug has no stored power history, so dashed parts are estimated from its usual day."
-                )
+                self._long_failed.add(ip)
+                self._chart_note.setToolTip(str(error) if error else "")
             else:
-                self._chart_note.setText("")
+                self._long_failed.discard(ip)
                 self._long[ip] = result
+            self._chart_note.setText(
+                "A plug has no stored power history, so dashed parts are estimated from its usual day."
+                if self._long_failed else ""
+            )
+            if not error and result:
                 self._render_chart()
 
         self._submit(self._controller.power_history(ip, hours), done)
 
-    def _render_chart(self) -> None:
-        ip = self._selected_ip()
-        samples = self._samples.get(ip)
-        hours = self._window.currentData()
-        name = self._devices[ip].alias if ip in self._devices else None
-        if hours and name:
-            span = hours * 3600
-            own = self._store.recent_samples(ip, time.time() - span)
-            points = merge_power(self._long.get(ip, []), own)
-            peak = max((w for _, w in points), default=0)
-            title = f"{name} · average watts · peak {peak:.1f} W" if points else f"{name} - average watts"
-            estimates = fill_gaps(points, [], self._profile(ip), 450)
-            self._chart.show_samples(
-                [w for _, w in points], title, [t for t, _ in points], span=span, interval=300, estimates=estimates
-            )
+    def _line_color(self, ip: str) -> str:
+        """A plug keeps its color whatever the filter, so toggling never repaints the others."""
+        if ip not in self._line_colors:
+            self._line_colors[ip] = LINE_COLORS[len(self._line_colors) % len(LINE_COLORS)]
+        return self._line_colors[ip]
+
+    def _render_toggles(self) -> None:
+        """One checkbox for the overall line and one per plug; rebuilt only when the plugs or their names change."""
+        names = tuple((ip, d.alias) for ip, d in self._devices.items())
+        if names == self._toggle_names:
             return
-        if name and samples:
-            title = f"{name} · now {samples[-1]:.1f} W · peak {max(samples):.1f} W"
-        else:
-            title = f"{name} - live watts" if name else "Select a plug"
-        times = self._times.get(ip)
-        estimates = list(self._long.get(ip, ()))
-        if samples and times:
-            readings = list(zip(times, samples, strict=True))
-            estimates += fill_gaps(readings, estimates, self._profile(ip), 2.5 * REFRESH_MS / 1000)
-        self._chart.show_samples(samples, title, times, estimates=estimates)
+        self._toggle_names = names
+        while self._toggles.count():
+            item = self._toggles.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        if names:
+            self._add_toggle(OVERALL, "Overall", theme().colors.accent)
+        for ip, alias in names:
+            self._add_toggle(ip, alias, self._line_color(ip))
+        self._toggles.addStretch(1)
+
+    def _add_toggle(self, key: str, label: str, color: str) -> None:
+        box = QCheckBox(label)
+        box.setIcon(swatch(color))
+        box.setChecked(key not in self._hidden)
+        box.toggled.connect(lambda on, key=key: self._set_line_shown(key, on))
+        self._toggles.addWidget(box)
+
+    def _set_line_shown(self, key: str, shown: bool) -> None:
+        self._hidden.discard(key) if shown else self._hidden.add(key)
+        self._render_chart()
+
+    def _render_chart(self) -> None:
+        self._render_toggles()
+        hours = self._window.currentData()
+        span = hours * 3600 if hours else None
+        interval = 300 if hours else REFRESH_MS / 1000
+        now = time.time()
+        plugs = []  # (ip, readings, estimates)
+        for ip in self._devices:
+            if hours:
+                points = merge_power(self._long.get(ip, []), self._store.recent_samples(ip, now - span))
+                estimates = fill_gaps(points, [], self._profile(ip), 450)
+            else:
+                points = list(zip(self._times.get(ip, ()), self._samples.get(ip, ()), strict=True))
+                estimates = list(self._long.get(ip, ()))
+                if points:
+                    estimates += fill_gaps(points, estimates, self._profile(ip), 2.5 * interval)
+            plugs.append((ip, points, estimates))
+        lines = []
+        if OVERALL not in self._hidden and plugs:  # the overall always sums every plug, shown or not
+            total = total_series([points for _, points, _ in plugs], interval)
+            lines.append(Line("Overall", [t for t, _ in total], [w for _, w in total]))
+        for ip, points, estimates in plugs:
+            if ip not in self._hidden:
+                times, watts = [t for t, _ in points], [w for _, w in points]
+                lines.append(Line(self._devices[ip].alias, times, watts, self._line_color(ip), estimates))
+        title = f"{self._window.currentText()} · average watts" if hours else "Live watts"
+        if not self._devices:
+            title = "No plugs yet"
+        self._chart.show_lines(lines, title, span, interval)

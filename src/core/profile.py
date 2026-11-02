@@ -20,6 +20,33 @@ def _typical(profile: Profile, ts: float) -> float | None:
     return mean if n >= MIN_READINGS else None
 
 
+def total_series(
+    series: Sequence[Sequence[tuple[float, float]]], interval: float, hold: int = 2,
+) -> list[tuple[float, float]]:
+    """Overall (ts, watts): per `interval` bucket, the sum of each plug's mean reading.
+
+    A plug whose reading landed in the next bucket is carried for up to `hold` buckets, so polls that
+    straddle a bucket edge do not make the total dip.
+    """
+    means: list[dict[int, float]] = []
+    for points in series:
+        buckets: dict[int, list[float]] = {}
+        for t, w in points:
+            buckets.setdefault(round(t / interval), []).append(w)
+        means.append({k: sum(v) / len(v) for k, v in buckets.items()})
+    last: list[tuple[int, float] | None] = [None] * len(means)
+    totals: list[tuple[float, float]] = []
+    for key in sorted({k for m in means for k in m}):
+        total = 0.0
+        for n, m in enumerate(means):
+            if key in m:
+                last[n] = (key, m[key])
+            if last[n] and key - last[n][0] <= hold:
+                total += last[n][1]
+        totals.append((key * interval, total))
+    return totals
+
+
 def fill_gaps(
     points: Sequence[tuple[float, float]],
     plug: Sequence[tuple[float, float]],
