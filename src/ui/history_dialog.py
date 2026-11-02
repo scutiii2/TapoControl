@@ -32,7 +32,6 @@ class HistoryPanel(QWidget):
         self._ip: str | None = None
         self._controller: TapoController | None = None
         self._rows: list[tuple[date, int]] = []
-        self._backfilling = False
 
         self._price = QDoubleSpinBox(decimals=4, maximum=1000, value=store.price_per_kwh())
         self._price.setMinimumWidth(140)
@@ -165,9 +164,8 @@ class HistoryPanel(QWidget):
 
         self._runner.submit(controller.energy(ip), summary)
         self._runner.submit(controller.usage(ip), usage)
-        # One-off backfill of every quarter the plug remembers; afterwards the current quarter is enough.
-        self._backfilling = not self._store.backfilled(ip)
-        self._runner.submit(controller.full_history(ip) if self._backfilling else controller.daily_history(ip), history)
+        # The current quarter shows up first; older quarters are fetched once afterwards.
+        self._runner.submit(controller.daily_history(ip), history)
 
     def _cost(self, wh: int) -> str:
         return f"{wh / 1000 * self._price.value():.2f}"
@@ -225,11 +223,31 @@ class HistoryPanel(QWidget):
             self._show_error(self._history_error, error)
         else:
             self._store.save_daily(self._ip, rows or [])
-            if self._backfilling:
-                self._store.set_backfilled(self._ip)
+            if not self._store.backfilled(self._ip):
+                self._backfill()
         # Stored days stay visible even when the plug is unreachable.
         self._rows = self._store.daily(self._ip)
         self._render_history()
+
+    def _backfill(self) -> None:
+        """One-off fetch of every older quarter the plug remembers."""
+        revision, ip = self._revision, self._ip
+        self._detail.setText(f"{ip} · Loading older history…")
+
+        def done(rows, error):
+            if revision != self._revision:
+                return
+            if error:
+                self._detail.setText(f"{ip} · Older history unavailable")
+                self._detail.setToolTip(str(error))
+                return
+            self._store.save_daily(ip, rows or [])
+            self._store.set_backfilled(ip)
+            self._detail.setText(f"{ip} · Selected plug")
+            self._rows = self._store.daily(ip)
+            self._render_history()
+
+        self._runner.submit(self._controller.full_history(ip), done)
 
     def _render_history(self) -> None:
         if self._ip is None:

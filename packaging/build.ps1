@@ -7,8 +7,14 @@ $Root = Split-Path $PSScriptRoot
 Set-Location -LiteralPath $Root
 $Py = Join-Path $Root ".venv\Scripts\python.exe"
 
-& python -m uv sync --frozen
-if ($LASTEXITCODE) { throw "uv sync failed (install uv: python -m pip install uv)" }
+# uv is a standalone tool; fall back to the pip-installed module. Without either, build from the existing .venv.
+$pyUv = $false
+try { & python -m uv --version *> $null; $pyUv = ($LASTEXITCODE -eq 0) } catch { }
+if (Get-Command uv -ErrorAction SilentlyContinue) { & uv sync --frozen }
+elseif ($pyUv) { & python -m uv sync --frozen }
+elseif (Test-Path $Py) { Write-Host "uv not found; using the existing .venv as is (install: winget install astral-sh.uv)." -ForegroundColor Yellow; $global:LASTEXITCODE = 0 }
+else { throw "uv not found and no .venv. Install uv: winget install astral-sh.uv, then run: uv sync" }
+if ($LASTEXITCODE) { throw "uv sync failed" }
 if (-not $SkipTests) { & $Py -m pytest -q; if ($LASTEXITCODE) { throw "tests failed" } }
 & $Py -m PyInstaller packaging/build.spec --noconfirm
 if ($LASTEXITCODE) { throw "PyInstaller failed" }

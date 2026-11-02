@@ -33,6 +33,9 @@ class Store:
             "CREATE TABLE IF NOT EXISTS nicknames (ip TEXT PRIMARY KEY, nickname TEXT NOT NULL);"
             # Daily Wh copied off the plug so history outlives what the plug itself keeps.
             "CREATE TABLE IF NOT EXISTS daily_energy (ip TEXT NOT NULL, day TEXT NOT NULL, wh INTEGER NOT NULL, PRIMARY KEY (ip, day));"
+            # Live watts readings so the live chart survives a restart; pruned to recent days.
+            "CREATE TABLE IF NOT EXISTS power_samples (ip TEXT NOT NULL, ts REAL NOT NULL, watts REAL NOT NULL);"
+            "CREATE INDEX IF NOT EXISTS power_samples_ip_ts ON power_samples (ip, ts);"
             "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
         )
         if "device_id" not in [r[1] for r in self._db.execute("PRAGMA table_info(devices)")]:
@@ -55,7 +58,7 @@ class Store:
             for d in devices:
                 # Same device at a new IP: its nickname moves with it.
                 if d.device_id in old_ips and old_ips[d.device_id] != d.ip:
-                    for table in ("nicknames", "daily_energy"):
+                    for table in ("nicknames", "daily_energy", "power_samples"):
                         self._db.execute(f"UPDATE OR REPLACE {table} SET ip = ? WHERE ip = ?", (d.ip, old_ips[d.device_id]))
             self._db.execute("DELETE FROM devices")
             self._db.executemany(
@@ -86,6 +89,18 @@ class Store:
         with self._db:
             self._db.execute("INSERT OR REPLACE INTO settings VALUES ('price_per_kwh', ?)", (str(price),))
 
+    def add_sample(self, ip: str, ts: float, watts: float) -> None:
+        with self._db:
+            self._db.execute("INSERT INTO power_samples VALUES (?, ?, ?)", (ip, ts, watts))
+
+    def recent_samples(self, ip: str, since: float) -> list[tuple[float, float]]:
+        rows = self._db.execute("SELECT ts, watts FROM power_samples WHERE ip = ? AND ts >= ? ORDER BY ts", (ip, since))
+        return list(rows)
+
+    def prune_samples(self, before: float) -> None:
+        with self._db:
+            self._db.execute("DELETE FROM power_samples WHERE ts < ?", (before,))
+
     def save_daily(self, ip: str, rows: list[tuple[date, int]]) -> None:
         """The plug is the source of truth for the days it reports, so its values replace stored ones."""
         with self._db:
@@ -98,11 +113,11 @@ class Store:
         return [(date.fromisoformat(d), wh) for d, wh in rows]
 
     def backfilled(self, ip: str) -> bool:
-        return self._db.execute("SELECT 1 FROM settings WHERE key = ?", (f"backfilled:{ip}",)).fetchone() is not None
+        return self._db.execute("SELECT 1 FROM settings WHERE key = ?", (f"backfilled2:{ip}",)).fetchone() is not None
 
     def set_backfilled(self, ip: str) -> None:
         with self._db:
-            self._db.execute("INSERT OR REPLACE INTO settings VALUES (?, '1')", (f"backfilled:{ip}",))
+            self._db.execute("INSERT OR REPLACE INTO settings VALUES (?, '1')", (f"backfilled2:{ip}",))
 
     def close(self) -> None:
         self._db.close()

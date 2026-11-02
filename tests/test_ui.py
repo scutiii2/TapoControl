@@ -252,9 +252,10 @@ def test_tab_energy_actions_and_live_theme_changes(window):
     assert w._selected_ip() == "192.168.1.3"
     assert w._tabs.currentWidget() is w._history
     runner.finish()
+    w._chart.show_samples([1.0, 2.0], "x")
     for scheme in (Qt.ColorScheme.Dark, Qt.ColorScheme.Light):
         theme().apply(scheme)
-        assert w._chart._series.pen().color().name() == theme().colors.accent
+        assert w._chart._lines[0].pen().color().name() == theme().colors.accent
         assert w._history._bars._bars.color().name() == theme().colors.accent
 
 
@@ -287,6 +288,8 @@ def test_energy_history_is_stored_and_range_switches_to_monthly(window):
     panel = w._history
     panel.load(controller, "192.168.1.2", "Desk")
     runner.finish()
+    assert not w._store.backfilled("192.168.1.2")  # current quarter shows first
+    runner.finish()  # then the one-off backfill of older quarters
     assert w._store.backfilled("192.168.1.2")
     assert w._store.daily("192.168.1.2") == [(date(2026, 11, 1), 420)]
     panel._range.setCurrentIndex(3)
@@ -297,3 +300,16 @@ def test_energy_history_is_stored_and_range_switches_to_monthly(window):
     assert "Last 7 days: 0.70 kWh" in panel._usage.text()
     panel.load(controller, "192.168.1.2", "Desk")  # second open: stored rows still shown
     assert panel._rows == []  # cleared until the plug answers
+
+
+def test_live_chart_breaks_line_over_gap_and_keeps_restored_samples():
+    import time
+
+    from ui.charts import LiveChart
+
+    chart = LiveChart(120)
+    now = time.time()
+    chart.show_samples([5.0, 6.0, 7.0], "x", [now - 400, now - 395, now - 5])
+    assert len(chart._lines) == 2  # app was closed between the second and third reading
+    chart.show_samples([5.0], "x", [now - 900])  # older than the 10 minute window
+    assert chart._lines == [] and chart._points == []

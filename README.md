@@ -10,7 +10,7 @@ Enter your Tapo app email and password when asked. The email and known plugs go 
 
 ## Develop
 ```
-python -m pip install uv
+winget install astral-sh.uv
 uv sync
 uv run run.py
 uv run pytest

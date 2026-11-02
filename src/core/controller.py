@@ -170,9 +170,11 @@ class TapoController:
         return await self._quarter(ip, start, today)
 
     async def _quarter(self, ip: str, start: date, today: date) -> list[tuple[date, int]]:
-        data = await self._call(ip, lambda plug: plug.get_energy_data(EnergyDataInterval.Daily, start))
         quarter_end = quarter_start(start + timedelta(days=95)) - timedelta(days=1)
-        return daily_rows(start, list(data.entries), min(today, quarter_end))
+        end = min(today, quarter_end)
+        # Without an explicit end date the plug answers for a single day only.
+        data = await self._call(ip, lambda plug: plug.get_energy_data(EnergyDataInterval.Daily, start, end))
+        return daily_rows(start, list(data.entries), end)
 
     @_mapped
     async def full_history(self, ip: str, max_quarters: int = 12) -> list[tuple[date, int]]:
@@ -183,7 +185,7 @@ class TapoController:
         for _ in range(max_quarters - 1):
             start = previous_quarter(start)
             try:
-                older = await self._quarter(ip, start, today)
+                older = await asyncio.wait_for(self._quarter(ip, start, today), 20)
             except AuthError:
                 raise
             except Exception:

@@ -1,5 +1,7 @@
 """Chart widgets: rolling live watts and daily kWh bars."""
+import time
 from collections import deque
+from collections.abc import Sequence
 from datetime import date
 
 from PySide6.QtCharts import QBarCategoryAxis, QBarSeries, QBarSet, QChart, QChartView, QLineSeries, QValueAxis
@@ -9,6 +11,8 @@ from PySide6.QtWidgets import QToolTip
 
 from ui.theme import theme
 
+SAMPLE_SECONDS = 5  # must match the main window's refresh interval
+GAP_SLOTS = 2.5  # further apart than this and the line breaks
 BOTTOM = Qt.AlignmentFlag.AlignBottom
 LEFT = Qt.AlignmentFlag.AlignLeft
 
@@ -32,7 +36,7 @@ def style_chart(view: QChartView) -> None:
 
 
 class LiveChart(QChartView):
-    """Last N watt samples of one plug."""
+    """Watt samples of one plug over the last `max_samples` x SAMPLE_SECONDS."""
 
     def __init__(self, max_samples: int):
         super().__init__(QChart())
@@ -41,51 +45,72 @@ class LiveChart(QChartView):
         chart.legend().hide()
         chart.setMargins(QMargins(8, 4, 16, 26))
         self.setMinimumHeight(200)
-        self._series = QLineSeries()
-        chart.addSeries(self._series)
-        x = QValueAxis()
-        x.setRange(0, max_samples)
-        x.setLabelsVisible(False)
+        self._x = QValueAxis()
+        self._x.setRange(0, max_samples)
+        self._x.setLabelsVisible(False)
+        self._x.setGridLineVisible(False)
         self._max = max_samples
-        self._samples: list[float] = []
+        self._points: list[tuple[float, float]] = []  # (slot, watts); slot == max_samples is "now"
+        self._lines: list[QLineSeries] = []
         self._hover: int | None = None
         self.setMouseTracking(True)
         self._y = QValueAxis()
         self._y.setTitleText("W")
-        chart.addAxis(x, BOTTOM)
+        chart.addAxis(self._x, BOTTOM)
         chart.addAxis(self._y, LEFT)
-        self._series.attachAxis(x)
-        self._series.attachAxis(self._y)
         self._y.setTickCount(4)
         self._y.setLabelFormat("%.0f")
-        x.setGridLineVisible(False)
         theme().changed.connect(self._apply_theme)
         self._apply_theme()
 
     def _apply_theme(self) -> None:
         style_chart(self)
-        self._series.setPen(QPen(QColor(theme().colors.accent), 2.5))
+        for line in self._lines:
+            line.setPen(QPen(QColor(theme().colors.accent), 2.5))
 
-    def show_samples(self, samples: deque[float] | None, title: str) -> None:
+    def show_samples(self, samples: deque[float] | None, title: str, times: Sequence[float] | None = None) -> None:
+        """`times` are epoch seconds per sample; with them, gaps (app closed) show as gaps."""
         samples = list(samples or ())
-        self._samples = samples
         self._hover = None
         self.chart().setTitle(title)
-        # Newest sample sits at the right edge ("now"); history fills in from there.
-        offset = self._max - len(samples)
-        self._series.replace([QPointF(offset + i, w) for i, w in enumerate(samples)])
-        self._y.setRange(0, max(10.0, max(samples, default=0) * 1.2))
+        if times is not None and len(times) == len(samples):
+            now = time.time()
+            points = [(self._max - (now - t) / SAMPLE_SECONDS, w) for t, w in zip(times, samples)]
+            points = [p for p in points if p[0] >= 0]
+        else:
+            offset = self._max - len(samples)
+            points = [(offset + i, w) for i, w in enumerate(samples)]
+        self._points = points
+        for line in self._lines:
+            self.chart().removeSeries(line)
+        self._lines = []
+        segment: list[tuple[float, float]] = []
+        for point in points + [None]:
+            if point is not None and (not segment or point[0] - segment[-1][0] <= GAP_SLOTS):
+                segment.append(point)
+                continue
+            if segment:
+                line = QLineSeries()
+                line.append([QPointF(x, w) for x, w in segment])
+                self.chart().addSeries(line)
+                line.attachAxis(self._x)
+                line.attachAxis(self._y)
+                self._lines.append(line)
+            segment = [point] if point is not None else []
+        peak = max((w for _, w in points), default=0)
+        self._y.setRange(0, max(10.0, peak * 1.2))
         self._y.applyNiceNumbers()
-        self._y.setLabelFormat("%.1f" if max(samples, default=0) < 10 else "%.0f")
+        self._y.setLabelFormat("%.1f" if peak < 10 else "%.0f")
+        self._apply_theme()
         self.viewport().update()
 
     def _index_at(self, x: float) -> int | None:
         area = self.chart().mapRectToScene(self.chart().plotArea())
-        if not self._samples or not area.left() <= x <= area.right():
+        if not self._points or not area.left() <= x <= area.right():
             return None
-        slot = round((x - area.left()) / area.width() * self._max)
-        index = slot - (self._max - len(self._samples))
-        return min(max(index, 0), len(self._samples) - 1) if slot >= self._max - len(self._samples) else None
+        slot = (x - area.left()) / area.width() * self._max
+        index = min(range(len(self._points)), key=lambda i: abs(self._points[i][0] - slot))
+        return index if abs(self._points[index][0] - slot) <= GAP_SLOTS else None
 
     def mouseMoveEvent(self, event) -> None:
         super().mouseMoveEvent(event)
@@ -113,17 +138,16 @@ class LiveChart(QChartView):
                 box.moveRight(x)
             painter.drawText(box, align | Qt.AlignmentFlag.AlignVCenter, label)
         if self._hover is not None:
-            slot = self._max - len(self._samples) + self._hover
+            slot, value = self._points[self._hover]
             x = area.left() + slot / self._max * area.width()
-            value = self._samples[self._hover]
             y = area.bottom() - value / (self._y.max() or 1) * area.height()
             painter.setPen(QPen(QColor(c.control), 1))
             painter.drawLine(QPointF(x, area.top()), QPointF(x, area.bottom()))
             painter.setPen(QPen(QColor(c.surface), 2))
             painter.setBrush(QColor(c.accent))
             painter.drawEllipse(QPointF(x, y), 4.5, 4.5)
-            ago = (len(self._samples) - 1 - self._hover) * 5
-            text = f"{value:.1f} W · " + ("now" if ago == 0 else f"{ago} s ago" if ago < 60 else f"{ago // 60} min {ago % 60:02d} s ago")
+            ago = round((self._max - slot) * SAMPLE_SECONDS)
+            text = f"{value:.1f} W · " + ("now" if ago <= SAMPLE_SECONDS else f"{ago} s ago" if ago < 60 else f"{ago // 60} min {ago % 60:02d} s ago")
             box = QRectF(0, 0, painter.fontMetrics().horizontalAdvance(text) + 16, 24)
             box.moveTopLeft(QPointF(min(x + 10, area.right() - box.width()), max(area.top(), y - 34)))
             painter.setPen(QPen(QColor(c.border), 1))

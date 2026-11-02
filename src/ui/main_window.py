@@ -51,6 +51,7 @@ class MainWindow(QMainWindow):
         self._state: dict[str, tuple[bool, float]] = {}
         self._inflight: set[str] = set()
         self._samples: dict[str, deque[float]] = {}
+        self._times: dict[str, deque[float]] = {}
         self._failures: dict[str, int] = {}
         self._last_rescan = 0.0
         self._auth_required = False
@@ -189,6 +190,7 @@ class MainWindow(QMainWindow):
     def start(self) -> None:
         for d in self._store.devices():
             self._devices[d.ip] = d
+        self._restore_samples()
         self._render()
         account = self._store.account()
         if account is None:
@@ -203,6 +205,15 @@ class MainWindow(QMainWindow):
             self.refresh()
         else:
             self.scan()
+
+    def _restore_samples(self) -> None:
+        """Reload recent readings so the live chart does not restart empty."""
+        now = time.time()
+        self._store.prune_samples(now - 86400)
+        for ip in self._devices:
+            rows = self._store.recent_samples(ip, now - SAMPLES * REFRESH_MS / 1000)[-SAMPLES:]
+            self._times[ip] = deque((t for t, _ in rows), maxlen=SAMPLES)
+            self._samples[ip] = deque((w for _, w in rows), maxlen=SAMPLES)
 
     def prompt_login(self, message: str = "") -> None:
         self._auth_required = True
@@ -382,7 +393,10 @@ class MainWindow(QMainWindow):
         elif state:
             self._failures.pop(ip, None)
             self._state[ip] = state
+            now = time.time()
             self._samples.setdefault(ip, deque(maxlen=SAMPLES)).append(state[1])
+            self._times.setdefault(ip, deque(maxlen=SAMPLES)).append(now)
+            self._store.add_sample(ip, now, state[1])
         self._render()
         if ip in self._power_confirming:
             self._refresh_ip(ip)
@@ -467,4 +481,4 @@ class MainWindow(QMainWindow):
             title = f"{self._devices[ip].alias} · now {samples[-1]:.1f} W · peak {max(samples):.1f} W"
         else:
             title = f"{self._devices[ip].alias} - live watts" if ip in self._devices else "Select a plug"
-        self._chart.show_samples(samples, title)
+        self._chart.show_samples(samples, title, self._times.get(ip))

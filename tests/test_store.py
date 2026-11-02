@@ -128,3 +128,11 @@ def test_backfill_flag(store):
     assert not store.backfilled("1.1.1.1")
     store.set_backfilled("1.1.1.1")
     assert store.backfilled("1.1.1.1")
+
+
+def test_power_samples_recent_and_prune(store):
+    for ts in (100.0, 200.0, 300.0):
+        store.add_sample("1.1.1.1", ts, ts / 10)
+    assert store.recent_samples("1.1.1.1", 150.0) == [(200.0, 20.0), (300.0, 30.0)]
+    store.prune_samples(250.0)
+    assert store.recent_samples("1.1.1.1", 0.0) == [(300.0, 30.0)]

@@ -157,3 +157,15 @@ def test_energy_runtime_usage_and_hourly():
     u = asyncio.run(c.usage("1.1.1.1"))
     assert (u.wh_7d, u.wh_30d, u.minutes_7d, u.minutes_30d) == (700, 3000, 300, 1200)
     assert asyncio.run(c.hourly_today("1.1.1.1")) == [100, 200][: datetime.now().hour + 1]
+
+
+def test_daily_request_passes_end_date():
+    seen = []
+
+    class Plug(FakePlug):
+        async def get_energy_data(self, interval, start_date, end_date=None):
+            seen.append((start_date, end_date))
+            return NS(entries=[1], start_date_time=start_date)
+
+    asyncio.run(controller(Plug()).daily_history("1.1.1.1"))
+    assert seen == [(quarter_start(date.today()), date.today())]
