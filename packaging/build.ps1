@@ -16,6 +16,9 @@ elseif (Test-Path $Py) { Write-Host "uv not found; using the existing .venv as i
 else { throw "uv not found and no .venv. Install uv: winget install astral-sh.uv, then run: uv sync" }
 if ($LASTEXITCODE) { throw "uv sync failed" }
 if (-not $SkipTests) { & $Py -m pytest -q; if ($LASTEXITCODE) { throw "tests failed" } }
+# A running copy locks its files in dist and breaks the clean step.
+Get-Process TapoControl -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Seconds 1
 & $Py -m PyInstaller packaging/build.spec --noconfirm
 if ($LASTEXITCODE) { throw "PyInstaller failed" }
 

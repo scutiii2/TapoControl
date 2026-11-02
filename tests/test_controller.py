@@ -15,6 +15,11 @@ from core.controller import (
 )
 
 
+def energy(values):
+    """The plug returns one result object per interval, not bare numbers."""
+    return [NS(energy=v) for v in values]
+
+
 class FakePlug:
     def __init__(self, fail=None):
         self.fail = fail
@@ -43,10 +48,10 @@ class FakePlug:
         return NS(today_energy=150, month_energy=4200, today_runtime=90, month_runtime=600)
 
     async def get_energy_data(self, interval, start_date, end_date=None):
-        return NS(entries=[100, 200], start_date_time=start_date)
+        return NS(entries=energy([100, 200]), start_date_time=start_date)
 
     async def get_power_data(self, interval, start, end):
-        return NS(entries=[10, 20], interval_length=5, start_date_time=datetime(2026, 11, 2, 12, 0))
+        return NS(entries=[NS(power=10), NS(power=20)], interval_length=5, start_date_time=datetime(2026, 11, 2, 12, 0))
 
     async def set_timer(self, delay_seconds, desired_state):
         self.calls.append(("timer", delay_seconds, desired_state))
@@ -142,7 +147,7 @@ def test_full_history_walks_back_quarters_and_stops_at_empty():
     class Plug(FakePlug):
         async def get_energy_data(self, interval, start_date, end_date=None):
             entries = {this_q: [10, 20, 30], last_q: [0, 0, 5, 6]}.get(start_date, [0] * 90)
-            return NS(entries=entries, start_date_time=start_date)
+            return NS(entries=energy(entries), start_date_time=start_date)
 
     rows = asyncio.run(controller(Plug()).full_history("1.1.1.1"))
     assert rows[0] == (last_q.replace(day=3), 5)  # leading zeros trimmed
@@ -155,7 +160,7 @@ def test_full_history_keeps_current_quarter_when_older_fails():
         async def get_energy_data(self, interval, start_date, end_date=None):
             if start_date != quarter_start(date.today()):
                 raise Exception("no data")
-            return NS(entries=[10], start_date_time=start_date)
+            return NS(entries=energy([10]), start_date_time=start_date)
 
     assert asyncio.run(controller(Plug()).full_history("1.1.1.1")) == [(quarter_start(date.today()), 10)]
 
@@ -182,7 +187,7 @@ def test_daily_request_passes_end_date():
     class Plug(FakePlug):
         async def get_energy_data(self, interval, start_date, end_date=None):
             seen.append((start_date, end_date))
-            return NS(entries=[1], start_date_time=start_date)
+            return NS(entries=energy([1]), start_date_time=start_date)
 
     asyncio.run(controller(Plug()).daily_history("1.1.1.1"))
     assert seen == [(quarter_start(date.today()), date.today())]

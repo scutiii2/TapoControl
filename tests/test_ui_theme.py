@@ -24,7 +24,7 @@ def test_palettes_keep_small_text_readable():
         assert contrast(colors.accent_text, colors.accent) >= 4.5
 
 
-def test_energy_errors_explain_failure_without_exposing_raw_details():
+def test_energy_errors_explain_failure():
     assert "timed out" in energy_error(TimeoutError("raw transport details"))
     assert "unreachable" in energy_error(ConnectionError("raw transport details"))
-    assert "raw transport details" not in energy_error(ValueError("raw transport details"))
+    assert "raw transport details" in energy_error(ValueError("raw transport details"))

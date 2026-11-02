@@ -185,21 +185,21 @@ class TapoController:
         now = datetime.now()
         today = now.date()
         data = await self._call(ip, lambda plug: plug.get_energy_data(EnergyDataInterval.Hourly, today, today))
-        return [int(wh) for wh in data.entries][: now.hour + 1]
+        return [int(e.energy) for e in data.entries][: now.hour + 1]
 
     @_mapped
     async def daily_history(self, ip: str) -> list[tuple[date, int]]:
         """Wh per day for the current quarter."""
         today = date.today()
-        start = quarter_start(today)
-        return await self._quarter(ip, start, today)
+        # The plug can leave a request unanswered; fail visibly instead of loading forever.
+        return await asyncio.wait_for(self._quarter(ip, quarter_start(today), today), 30)
 
     async def _quarter(self, ip: str, start: date, today: date) -> list[tuple[date, int]]:
         quarter_end = quarter_start(start + timedelta(days=95)) - timedelta(days=1)
         end = min(today, quarter_end)
         # Without an explicit end date the plug answers for a single day only.
         data = await self._call(ip, lambda plug: plug.get_energy_data(EnergyDataInterval.Daily, start, end))
-        return daily_rows(start, list(data.entries), end)
+        return daily_rows(start, [int(e.energy) for e in data.entries], end)
 
     @_mapped
     async def full_history(self, ip: str, max_quarters: int = 12) -> list[tuple[date, int]]:
@@ -228,4 +228,4 @@ class TapoController:
         data = await self._call(ip, lambda plug: plug.get_power_data(PowerDataInterval.Every5Minutes, start, end))
         step = (data.interval_length or 5) * 60
         first = data.start_date_time.timestamp()
-        return [(first + i * step, float(w)) for i, w in enumerate(data.entries)]
+        return [(first + i * step, float(e.power)) for i, e in enumerate(data.entries)]

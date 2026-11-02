@@ -42,7 +42,8 @@ def energy_error(error: BaseException) -> str:
         return "The plug timed out. Check its connection and reopen Energy to retry."
     if isinstance(error, ConnectionError):
         return "The plug is unreachable. Check its connection and reopen Energy to retry."
-    return "Energy data is unavailable. Reopen Energy to try again."
+    detail = str(error).strip().splitlines()[0][:160] if str(error).strip() else type(error).__name__
+    return f"Energy data is unavailable ({detail}). Reopen Energy to try again."
 
 
 def power_icon(color: str) -> QIcon:

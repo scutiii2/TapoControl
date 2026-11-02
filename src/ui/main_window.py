@@ -281,7 +281,7 @@ class MainWindow(QMainWindow):
             self.scan()
 
     def scan(self) -> None:
-        if not self._controller or self._auth_required:
+        if not self._can_send():
             return
         self.statusBar().showMessage("Scanning...")
         self._submit(self._controller.discover(), self._on_scanned)
@@ -297,7 +297,7 @@ class MainWindow(QMainWindow):
         self._runner.submit(coro, completed)
 
     def refresh(self) -> None:
-        if not self._controller or self._auth_required:
+        if not self._can_send():
             return
         for ip in self._devices:
             if ip not in self._inflight:
@@ -305,7 +305,7 @@ class MainWindow(QMainWindow):
         self._fetch_long()
 
     def _refresh_ip(self, ip: str) -> None:
-        if not self._controller or self._auth_required or ip not in self._devices:
+        if not self._can_send() or ip not in self._devices:
             return
         self._inflight.add(ip)
         confirming = ip in self._power_confirming
@@ -314,14 +314,12 @@ class MainWindow(QMainWindow):
             lambda r, e: self._on_snapshot(ip, r, e, confirms_power=confirming),
         )
 
+    def _can_send(self) -> bool:
+        return bool(self._controller) and not self._auth_required
+
     def _selected_ip(self) -> str | None:
         item = self._list.currentItem()
         return item.data(Qt.ItemDataRole.UserRole) if item else None
-
-    def _set_power(self, on: bool) -> None:
-        ip = self._selected_ip()
-        if ip:
-            self._toggle_ip(ip, on)
 
     def _select_ip(self, ip: str) -> None:
         for index in range(self._list.count()):
@@ -332,7 +330,7 @@ class MainWindow(QMainWindow):
 
     def _toggle_ip(self, ip: str, on: bool) -> None:
         self._select_ip(ip)
-        if not self._controller or self._auth_required or ip in self._power_pending:
+        if not self._can_send() or ip in self._power_pending:
             return
         self._power_pending.add(ip)
         self._render_cards()
@@ -349,7 +347,7 @@ class MainWindow(QMainWindow):
         self._submit(self._controller.set_power(ip, on), toggled)
 
     def _set_timer(self, ip: str, minutes: int, on: bool) -> None:
-        if not self._controller or self._auth_required:
+        if not self._can_send():
             return
 
         def done(_result, error):
@@ -361,7 +359,7 @@ class MainWindow(QMainWindow):
         self._submit(self._controller.set_timer(ip, minutes, on), done)
 
     def _clear_timer(self, ip: str) -> None:
-        if not self._controller or self._auth_required:
+        if not self._can_send():
             return
 
         def done(_result, error):
@@ -380,7 +378,7 @@ class MainWindow(QMainWindow):
         return timer_note(deadline - time.time(), on)
 
     def set_all_power(self, on: bool) -> None:
-        if not self._controller or self._auth_required:
+        if not self._can_send():
             return
         for ip in self._devices:
             self._submit(self._controller.set_power(ip, on), self._on_toggled)
@@ -572,7 +570,7 @@ class MainWindow(QMainWindow):
         ip, hours = self._selected_ip(), self._window.currentData()
         if not hours and ip is not None and self._has_gap(ip):
             hours = 1  # the live view only needs the plug's averages to estimate across its gaps
-        if not hours or ip is None or not self._controller or self._auth_required:
+        if not hours or ip is None or not self._can_send():
             return
         last = self._long_fetched.get(ip)
         if last and last[0] == hours and time.monotonic() - last[1] < LONG_REFRESH_S:
