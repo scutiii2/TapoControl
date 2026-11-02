@@ -500,7 +500,7 @@ class MainWindow(QMainWindow):
             if ip not in self._devices:
                 self._list.takeItem(index)
                 self._cards.pop(ip).deleteLater()
-        for ip, d in self._devices.items():
+        for ip in self._devices:
             if ip in self._cards:
                 continue
             card = PlugCard(ip)
@@ -565,7 +565,7 @@ class MainWindow(QMainWindow):
 
     def _has_gap(self, ip: str) -> bool:
         times = list(self._times.get(ip, ()))
-        return any(b - a > 2.5 * REFRESH_MS / 1000 for a, b in zip(times, times[1:]))
+        return any(b - a > 2.5 * REFRESH_MS / 1000 for a, b in zip(times, times[1:], strict=False))
 
     def _fetch_long(self) -> None:
         """Pull the plug's own 5-minute history for the selected plug when a long window is chosen."""
@@ -618,5 +618,6 @@ class MainWindow(QMainWindow):
         times = self._times.get(ip)
         estimates = list(self._long.get(ip, ()))
         if samples and times:
-            estimates += fill_gaps(list(zip(times, samples)), estimates, self._profile(ip), 2.5 * REFRESH_MS / 1000)
+            readings = list(zip(times, samples, strict=True))
+            estimates += fill_gaps(readings, estimates, self._profile(ip), 2.5 * REFRESH_MS / 1000)
         self._chart.show_samples(samples, title, times, estimates=estimates)

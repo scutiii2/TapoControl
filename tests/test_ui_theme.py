@@ -8,7 +8,7 @@ def contrast(first: str, second: str) -> float:
         c = QColor(value)
         channels = [c.redF(), c.greenF(), c.blueF()]
         linear = [v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in channels]
-        return sum(v * weight for v, weight in zip(linear, (0.2126, 0.7152, 0.0722)))
+        return sum(v * weight for v, weight in zip(linear, (0.2126, 0.7152, 0.0722), strict=True))
 
     values = sorted((luminance(first), luminance(second)))
     return (values[1] + 0.05) / (values[0] + 0.05)

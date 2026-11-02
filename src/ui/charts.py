@@ -106,7 +106,7 @@ class LiveChart(QChartView):
         self.chart().setTitle(title)
         if times is not None and len(times) == len(samples):
             now = time.time()
-            points = [(self._max - (now - t) / self._span * self._max, w) for t, w in zip(times, samples)]
+            points = [(self._max - (now - t) / self._span * self._max, w) for t, w in zip(times, samples, strict=True)]
             points = [p for p in points if p[0] >= 0]
         else:
             offset = self._max - len(samples)

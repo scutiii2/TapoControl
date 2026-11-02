@@ -147,7 +147,7 @@ def test_full_history_walks_back_quarters_and_stops_at_empty():
     rows = asyncio.run(controller(Plug()).full_history("1.1.1.1"))
     assert rows[0] == (last_q.replace(day=3), 5)  # leading zeros trimmed
     assert (last_q.replace(day=4), 6) in rows
-    assert all(a[0] < b[0] for a, b in zip(rows, rows[1:]))
+    assert all(a[0] < b[0] for a, b in zip(rows, rows[1:], strict=False))
 
 
 def test_full_history_keeps_current_quarter_when_older_fails():

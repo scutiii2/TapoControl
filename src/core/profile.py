@@ -32,7 +32,7 @@ def fill_gaps(
     still meets the last reading before the gap and the first one after it.
     """
     estimates: list[tuple[float, float]] = []
-    for (t0, w0), (t1, w1) in zip(points, points[1:]):
+    for (t0, w0), (t1, w1) in zip(points, points[1:], strict=False):
         if t1 - t0 <= max(gap_seconds, MIN_FILL_SECONDS) or any(t0 < t < t1 for t, _ in plug):
             continue
         shift0 = w0 - (_typical(profile, t0) or w0)
