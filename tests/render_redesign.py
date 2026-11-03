@@ -6,20 +6,24 @@ Usage: .venv/Scripts/python.exe tests/render_redesign.py
 import math
 import os
 import sys
+import tempfile
 import time
 from collections import deque
+from datetime import date, timedelta
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from PySide6.QtCore import QTimer  # noqa: E402
-from PySide6.QtGui import QFontDatabase  # noqa: E402
+from PySide6.QtCore import QPoint, QTimer  # noqa: E402
+from PySide6.QtGui import QFontDatabase, QPainter  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from core.controller import EnergySummary  # noqa: E402
 from core.store import DeviceInfo, Store  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
+from ui.theme import theme  # noqa: E402
 
 
 class OfflineRunner:
@@ -33,7 +37,7 @@ class OfflineRunner:
 class NativePreview:
     def __init__(self, app: QApplication) -> None:
         self.app = app
-        self.output = Path(__file__).resolve().parents[1] / "artifacts" / "redesign"
+        self.output = Path(tempfile.gettempdir()) / "tapocontrol-render"
         self.output.mkdir(parents=True, exist_ok=True)
         self.store = Store(Path(":memory:"))
         self.window = MainWindow(self.store, OfflineRunner())
@@ -53,7 +57,19 @@ class NativePreview:
             values = [182.4 + 15 * math.sin(k / 8) if i == 0 else 42.8 if i == 1 else 0 for k in range(120)]
             self.window._samples[d.ip] = deque(values, maxlen=120)
             self.window._times[d.ip] = deque([now - (119 - k) * 5 for k in range(120)], maxlen=120)
+        today = date.today()
+        for i, d in enumerate(devices[:3]):
+            self.window._overview.set_plugs({x.ip: x.alias for x in devices})
+            self.window._overview.set_hours(d.ip, [round(60 * (i + 1) * (1 + math.sin(h / 3))) for h in range(15)])
+            days = max(today.day, 12)
+            first = today.replace(day=1)
+            rows = [(first + timedelta(days=k), 900 + 300 * math.sin(k / 2) + 40 * i) for k in range(days)]
+            self.window._overview.set_days(d.ip, rows)
+        for k in range(40):
+            self.window._overview._trend.append(200 + 40 * math.sin(k / 4) + k)
         self.window._render()
+        if os.environ.get("RENDER_THEME"):  # e.g. RENDER_THEME=dark
+            theme().set_mode(os.environ["RENDER_THEME"])
         self.window.show()
         self.shots = iter([
             ("overview-expanded", 1440, 1060, False, 0),
@@ -62,6 +78,9 @@ class NativePreview:
             ("devices-narrow", 760, 640, True, 1),
             ("account", 1440, 1060, False, 3),
             ("settings", 1440, 1060, False, 4),
+            ("energy-menu", 1440, 700, False, 2),
+            ("devices", 1440, 800, False, 1),
+            ("devices-no-chart", 1440, 800, False, 1),
         ])
         self.advance()
 
@@ -80,7 +99,21 @@ class NativePreview:
 
     def capture(self) -> None:
         path = self.output / f"{self.name}.png"
-        if not self.window.grab().save(str(path)):
+        if self.name == "devices-no-chart":
+            self.window._devices_page.chart_toggle.setChecked(False)
+            QTest.qWait(100)  # the layout settles over a few event-loop turns
+        picture = self.window.grab()
+        if self.name == "energy-menu":  # popups are separate windows, so paste the open menu into the shot
+            split = self.window._history._split
+            split.main.setEnabled(True)
+            split.arrow.click()
+            self.app.processEvents()
+            QTest.qWait(300)
+            painter = QPainter(picture)
+            painter.drawPixmap(split.mapTo(self.window, split.rect().bottomLeft()) + QPoint(0, 4), split.menu.grab())
+            painter.end()
+            split.menu.hide()
+        if not picture.save(str(path)):
             raise RuntimeError(f"Could not render {path}")
         print(f"{path} ({self.window.width()}x{self.window.height()})", flush=True)
         self.advance()

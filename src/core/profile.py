@@ -1,9 +1,12 @@
 """Typical watts of a plug by time of day, used to estimate the parts of a chart nobody recorded."""
+import math
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 
 SLOT_SECONDS = 300
 MIN_FILL_SECONDS = 30  # shorter gaps are just a missed poll; leave the straight line
+FORECAST_STEPS = 12
+FORECAST_FADE = 1800  # seconds for the last reading's distance from usual to fade out
 MIN_READINGS = 12  # about a minute of 5-second readings before a slot counts as known
 
 Key = tuple[int, int]  # (is_weekend, slot of the day)
@@ -73,3 +76,26 @@ def fill_gaps(
                 estimates.append((t, max(0.0, base + shift)))
             t += step
     return estimates
+
+
+def forecast_power(
+    last: tuple[float, float], profile: Profile, now: float, horizon: float,
+) -> list[tuple[float, float]]:
+    """Predicted (ts, watts) over the `horizon` seconds after `now`, in equal steps.
+
+    The plug's usual watts for each time of day, shifted by how far the last reading is from usual; the shift
+    fades out over half an hour. Returns [] when the usual level is unknown for any of those times.
+    """
+    t0, w0 = last
+    base0 = _typical(profile, t0)
+    if base0 is None:
+        return []
+    shift = w0 - base0
+    points = []
+    for step in range(1, FORECAST_STEPS + 1):
+        t = now + horizon * step / FORECAST_STEPS
+        base = _typical(profile, t)
+        if base is None:
+            return []
+        points.append((t, max(0.0, base + shift * math.exp(-(t - t0) / FORECAST_FADE))))
+    return points

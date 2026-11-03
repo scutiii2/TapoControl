@@ -1,17 +1,18 @@
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QCheckBox, QFrame, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QLabel, QLineEdit, QPushButton
 
 from ui import tokens as t
 from ui.theme import theme
+from ui.page_layout import FORM_WIDTH, ControlPage, panel, text_label
 
 
-class LoginPanel(QWidget):
+class LoginPanel(ControlPage):
     """Account tab submits runtime credentials without a modal event loop."""
 
     submitted = Signal()
 
     def __init__(self, parent=None, email: str = "", message: str = ""):
-        super().__init__(parent)
+        super().__init__(parent, max_width=FORM_WIDTH)
         theme()
         self.email = QLineEdit(email)
         self.password = QLineEdit()
@@ -19,21 +20,11 @@ class LoginPanel(QWidget):
         self.email.setPlaceholderText("you@example.com")
         self.email.setAccessibleName("Tapo account email")
         self.password.setAccessibleName("Tapo account password")
-        self.email.setMaximumWidth(560)
-        self.password.setMaximumWidth(560)
         self.email.returnPressed.connect(self.password.setFocus)
         self.password.returnPressed.connect(self._accept)
-        title = QLabel("Tapo account")
-        title.setProperty("role", "heading")
-        detail = QLabel("Use your Tapo app account to control plugs.")
-        detail.setProperty("tone", "muted")
-        detail.setWordWrap(True)
-        card = QFrame()
-        card.setProperty("card", True)
-        form = QVBoxLayout(card)
-        form.setContentsMargins(t.CARD_PAD, t.CARD_PAD, t.CARD_PAD, t.CARD_PAD)
-        form.setSpacing(t.SP_XS)  # a label sits closer to its field than to the previous one
-        for text, field in (("&Email", self.email), ("&Password", self.password)):
+        card, form = panel("Tapo account")
+        form.addWidget(text_label("Use the account from your Tapo app.", muted=True))
+        for text, field in (("Email", self.email), ("Password", self.password)):
             label = QLabel(text)
             label.setBuddy(field)
             form.addWidget(label)
@@ -45,10 +36,6 @@ class LoginPanel(QWidget):
         )
         form.addWidget(self._reveal)
         form.addSpacing(t.SP_SM)
-        note = QLabel("Password saved in Windows Credential Manager.")
-        note.setProperty("tone", "muted")
-        note.setWordWrap(True)
-        form.addWidget(note)
         self._message = QLabel()
         self._message.setProperty("tone", "error")
         self._message.setTextFormat(Qt.TextFormat.PlainText)
@@ -59,13 +46,13 @@ class LoginPanel(QWidget):
         self._submit.clicked.connect(self._accept)
         form.addSpacing(t.SP_SM)
         form.addWidget(self._submit, 0, Qt.AlignmentFlag.AlignLeft)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, t.PAGE_TOP, 0, 0)
-        layout.setSpacing(t.SP_SM)
-        layout.addWidget(title)
-        layout.addWidget(detail)
-        layout.addSpacing(t.SP_SM)
+        form.addWidget(text_label("Your plugs confirm sign-in when they respond.", "caption"))
+        layout = self.content
         layout.addWidget(card)
+        storage, note = panel("Credential storage")
+        note.addWidget(text_label("Password saved in Windows Credential Manager.", muted=True))
+        note.addWidget(text_label("Email and known plugs saved on this PC.", muted=True))
+        layout.addWidget(storage)
         layout.addStretch()
         self.set_message(message)
 

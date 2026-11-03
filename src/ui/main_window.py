@@ -1,50 +1,46 @@
 import time
-from datetime import date
 from collections import deque
 from collections.abc import Callable, Coroutine
 from typing import Any
 
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QFont
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
-    QComboBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QListWidgetItem,
-    QListView,
     QMainWindow,
     QMenu,
     QPushButton,
-    QScrollArea,
-    QSplitter,
     QSystemTrayIcon,
     QVBoxLayout,
-    QWidget,
 )
 
 from core.async_runner import AsyncRunner
 from core.alerts import AlertEngine
 from core.controller import AuthError, EnergySummary, TapoController, merge_power
-from core.profile import fill_gaps, total_series
+from core.profile import fill_gaps, forecast_power, total_series
 from core.store import DeviceInfo, Store
 from ui.charts import OVERALL, Line, LineColors, LineToggles, LiveChart
 from ui.history_dialog import HistoryPanel
+from ui.devices_page import DevicesPage
+from ui.page_layout import ChoiceBox
 from ui.login_dialog import LoginPanel
 from ui.overview_page import OverviewPage
-from ui.plug_card import PlugCard, timer_note
+from ui.plug_card import DeviceControlRow, PlugCard, mark_first, timer_note
 from ui.settings_panel import SettingsPanel
-from ui.device_grid import DeviceList
 from ui.side_tabs import SideTabs
 from ui import tokens as t
 from ui.theme import action_error, power_icon, theme
 
 REFRESH_MS = 5000
 SAMPLES = 120  # 10 minutes of watts at REFRESH_MS
+HISTORY_HOURS = 24  # how far back the chart can be scrolled; the app keeps this much
 OFFLINE_RESCAN_AFTER = 3  # consecutive failed refreshes before looking for a new IP
 RESCAN_COOLDOWN_S = 60
-WINDOWS = (("Last 10 minutes", 0), ("Last hour", 1), ("Last 24 hours", 24))  # label, hours of plug history
+WINDOWS = (("Last 10 minutes", 0, "10m"), ("Last hour", 1, "1h"), ("Last 24 hours", 24, "24h"))  # label, hours, short
 LONG_REFRESH_S = 60
 PAGES = {  # page kind -> (header title, one line about it)
     "overview": ("Overview", "Power and usage across all your plugs."),
@@ -86,59 +82,30 @@ class MainWindow(QMainWindow):
         self._colors = LineColors()
         self._energy: dict[str, EnergySummary] = {}  # latest energy totals, for the Overview
         self._overview_fetched: dict[str, float] = {}  # ip -> monotonic time of the last Overview fetch
+        self._device_energy_fetched: dict[str, float] = {}
         self._long_failed: set[str] = set()
 
-        self._list = DeviceList()
-        self._list.setSpacing(t.SP_SM)
-        self._list.setResizeMode(QListView.ResizeMode.Adjust)
-        self._list.setMinimumHeight(100)
-        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._list.setAccessibleName("Smart plugs")
         self._chart = LiveChart(SAMPLES)
-        self._window = QComboBox()
+        self._window = ChoiceBox()
         self._window.setAccessibleName("Chart range")
-        for label, hours in WINDOWS:
+        for label, hours, _ in WINDOWS:
             self._window.addItem(label, hours)
         self._window.currentIndexChanged.connect(self._window_changed)
-        self._list.currentItemChanged.connect(self._selection_changed)
         self._scan = QPushButton("Scan network")
-        self._scan.setProperty("primary", True)
         self._scan.clicked.connect(self.scan)
         self._all_on = QPushButton("Turn all on")
         self._all_off = QPushButton("Turn all off")
         self._all_on.clicked.connect(lambda: self.set_all_power(True))
         self._all_off.clicked.connect(lambda: self.set_all_power(False))
         self._tabs = SideTabs()
-        header = QHBoxLayout()
-        header.setSpacing(t.SP_MD)
         self._logo = self._tabs._brand_icon
-        header.addWidget(self._tabs.collapse_button)
-        breadcrumb = QLabel("Workspace /")
-        breadcrumb.setProperty("role", "small")
-        breadcrumb.setProperty("tone", "muted")
-        header.addWidget(breadcrumb)
-        self._title = QLabel()
-        self._title.setProperty("role", "small")
-        self._title.setProperty("tone", "muted")
-        header.addWidget(self._title, 1)
-        today = QLabel(date.today().strftime("%A, %B %#d"))
-        today.setProperty("role", "caption")
-        header.addWidget(today)
-        header.addWidget(self._scan)
-        self._scan.setProperty("primary", False)
         intro = QHBoxLayout()
         intro.setSpacing(t.SP_MD)
         headings = QVBoxLayout()
         headings.setSpacing(t.SP_SM)
-        eyebrow = QLabel("YOUR HOME, AT A GLANCE")
-        eyebrow.setProperty("role", "eyebrow")
-        self._headline = QLabel("A little less energy. A little more control.")
+        self._headline = QLabel()
         self._headline.setProperty("role", "title")
-        headline_font = self._headline.font()
-        headline_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, -1.1)
-        self._headline.setFont(headline_font)
         self._headline.setWordWrap(True)
-        headings.addWidget(eyebrow)
         headings.addWidget(self._headline)
         self._subtitle = QLabel()
         self._subtitle.setProperty("tone", "muted")
@@ -148,67 +115,34 @@ class MainWindow(QMainWindow):
         intro.addLayout(headings, 1)
         self._live = QLabel("●  Live · every 5s")
         self._live.setProperty("role", "caption")
-        self._live.setStyleSheet("border: 1px solid #e3e9e3; border-radius: 16px; padding: 8px 13px;")
         intro.addWidget(self._live, 0, Qt.AlignmentFlag.AlignVCenter)
         self._tabs.content.setContentsMargins(t.PAGE_X, t.PAGE_Y, t.PAGE_X, t.PAGE_BOTTOM)
         self._tabs.content.setSpacing(t.SECTION_GAP)
-        self._tabs.content.insertLayout(0, header)
-        self._tabs.content.insertLayout(1, intro)
-        devices = QWidget()
-        devices_layout = QVBoxLayout(devices)
-        devices_layout.setContentsMargins(0, t.PAGE_TOP, 0, 0)
-        devices_layout.setSpacing(t.SP_MD)
-        toolbar = QHBoxLayout()
-        self._count = QLabel("DEVICES · 0 plugs")
-        self._count.setProperty("tone", "muted")
-        toolbar.addWidget(self._count, 1)
-        toolbar.addWidget(self._all_on)
-        toolbar.addWidget(self._all_off)
-        devices_layout.addLayout(toolbar)
-        plugs = QWidget()
-        plugs_layout = QVBoxLayout(plugs)
-        plugs_layout.setContentsMargins(0, 0, 0, 0)
-        self._empty = QLabel("No plugs yet\nScan your network to find Tapo P110 plugs.")
-        self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty.setProperty("tone", "muted")
-        self._empty.setWordWrap(True)
-        plugs_layout.addWidget(self._empty, 1)
-        plugs_layout.addWidget(self._list, 1)
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.setChildrenCollapsible(False)
-        splitter.setMinimumHeight(560)
-        splitter.addWidget(plugs)
-        chart_box = QWidget()
-        chart_layout = QVBoxLayout(chart_box)
-        chart_layout.setContentsMargins(0, 0, 0, 0)
-        chart_layout.setSpacing(t.SP_SM)
-        chart_head = QHBoxLayout()
-        self._chart_note = QLabel()
-        self._chart_note.setProperty("tone", "muted")
-        chart_head.addWidget(self._chart_note, 1)
-        chart_head.addWidget(self._window)
-        chart_layout.addLayout(chart_head)
+        self._tabs.content.insertLayout(0, intro)
         self._toggles = LineToggles(self._colors)
         self._toggles.changed.connect(self._render_chart)
-        chart_layout.addWidget(self._toggles)
-        chart_layout.addWidget(self._chart, 1)
-        splitter.addWidget(chart_box)
-        splitter.setSizes([360, 260])
-        devices_layout.addWidget(splitter, 1)
-        devices_scroll = QScrollArea()
-        devices_scroll.setWidgetResizable(True)
-        devices_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        devices_scroll.setWidget(devices)
+        self._devices_page = DevicesPage(
+            self._chart, self._window, self._toggles, self._scan, self._all_on, self._all_off,
+        )
+        self._list = self._devices_page.list
+        self._list.currentItemChanged.connect(self._selection_changed)
+        self._count = self._devices_page.total
+        self._empty = self._devices_page.empty
+        self._chart_note = self._devices_page.chart_note
         self._overview = OverviewPage(self._colors)
+        self._overview.set_ranges([short for _, _, short in WINDOWS])
+        self._overview.range_selected.connect(self._window.setCurrentIndex)
+        self._window.currentIndexChanged.connect(self._overview.select_range)
         self._overview.card_added.connect(self._connect_card)
-        self._overview.all_power_requested.connect(self.set_all_power)
+        self._overview.scan_requested.connect(self.scan)
         self._history = HistoryPanel(self, store, runner, self._colors)
         self._history.auth_failed.connect(self._on_error)
         self._login = LoginPanel(self)
         self._settings = SettingsPanel(self, store)
         self._login.submitted.connect(self._save_login)
         self._tabs.addTab(self._overview, "overview", "Overview")
-        self._tabs.addTab(devices_scroll, "devices", "Devices")
+        self._tabs.addTab(self._devices_page, "devices", "Devices")
+        self._overview.devices_requested.connect(lambda: self._tabs.setCurrentWidget(self._devices_page))
         self._tabs.addTab(self._history, "energy", "Energy")
         self._tabs.addTab(self._login, "account", "Account", bottom=True)
         self._tabs.addTab(self._settings, "settings", "Settings")
@@ -217,12 +151,13 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._tabs)
         self.setMinimumSize(760, 640)
         self.resize(1440, 1060)
-        note = QLabel("Runs quietly in your system tray")
-        note.setProperty("role", "caption")
-        self.statusBar().addPermanentWidget(note)
-        self.statusBar().setSizeGripEnabled(False)
+        status = self.statusBar()
+        status.setSizeGripEnabled(False)
+        status.hide()  # an idle bar is only a strip of empty space under the sidebar
+        status.messageChanged.connect(lambda text: status.setVisible(bool(text)))
         self._setup_tray()
         self._apply_theme()
+        self._theme.set_mode(store.setting("theme", "system"))
 
         self._timer = QTimer(self, interval=REFRESH_MS)
         self._timer.timeout.connect(self.refresh)
@@ -269,6 +204,7 @@ class MainWindow(QMainWindow):
             QApplication.quit()
 
     def start(self) -> None:
+        self._tabs.setCurrentWidget(self._devices_page)
         for d in self._store.devices():
             self._devices[d.ip] = d
         self._restore_samples()
@@ -326,11 +262,12 @@ class MainWindow(QMainWindow):
         self._scanning = False
         self._energy.clear()
         self._overview_fetched.clear()
+        self._device_energy_fetched.clear()
         self._auth_required = False
         self._login.password.clear()
         self._signing_in = True
         self._login.set_message("Account saved. Checking it with Tapo…", error=False)
-        self._tabs.setCurrentIndex(0)
+        self._tabs.setCurrentWidget(self._devices_page)
         self._timer.start()
         self._render()
         if self._devices:
@@ -366,18 +303,28 @@ class MainWindow(QMainWindow):
         self._fetch_overview()
 
     def _fetch_overview(self) -> None:
-        """Energy and today's hours for the Overview: at most once a minute per plug, only while it is open."""
-        if self._tabs.currentWidget() is not self._overview or not self._can_send():
+        """Fetch page data at most once a minute; Devices only needs today's totals."""
+        overview = self._tabs.currentWidget() is self._overview
+        if not overview and self._tabs.currentWidget() is not self._devices_page:
             return
+        if not self._can_send():
+            return
+        fetched = self._overview_fetched if overview else self._device_energy_fetched
         for ip in self._devices:
-            last = self._overview_fetched.get(ip)
+            last = fetched.get(ip)
             if last is not None and time.monotonic() - last < LONG_REFRESH_S:
                 continue
-            self._overview_fetched[ip] = time.monotonic()
+            fetched[ip] = time.monotonic()
             self._submit(self._controller.energy(ip), self._background(lambda r, ip=ip: self._on_energy(ip, r)))
+            if not overview:
+                continue
             self._submit(
                 self._controller.hourly_today(ip),
                 self._background(lambda r, ip=ip: self._overview.set_hours(ip, r or [])),
+            )
+            self._submit(
+                self._controller.daily_history(ip),
+                self._background(lambda r, ip=ip: self._overview.set_days(ip, r or [])),
             )
 
     def _background(self, handler: Callable) -> Callable:
@@ -393,6 +340,8 @@ class MainWindow(QMainWindow):
     def _on_energy(self, ip: str, summary: EnergySummary | None) -> None:
         if summary:
             self._energy[ip] = summary
+            if ip in self._cards:
+                self._cards[ip].show_today(summary.today_wh)
             self._render_overview()
 
     def _render_overview(self) -> None:
@@ -406,7 +355,6 @@ class MainWindow(QMainWindow):
             sum(x.today_wh for x in sums) if sums else None, sum(x.month_wh for x in sums) if sums else None, price,
         )
         self._overview.show_device_energy({ip: self._energy[ip].today_wh for ip in self._devices if ip in self._energy})
-        self._overview.set_controls_enabled(self._can_send())
         self._tabs.show_connection_count(len(self._state))
         for ip, card in self._overview.device_cards.items():
             self._update_card(ip, card)
@@ -518,17 +466,11 @@ class MainWindow(QMainWindow):
             self._history.clear()
 
     def _show_page(self, index: int) -> None:
-        """The header names the open page, so the icon rail is never the only orientation."""
+        """The page headline names the open page, so the icon rail is never the only orientation."""
         kind = self._tabs.kind(index)
-        self._title.setText(PAGES[kind][0])
-        self._headline.setText(
-            "A little less energy. A little more control." if kind == "overview" else PAGES[kind][0]
-        )
-        self._subtitle.setText(
-            "Keep an eye on your usage. Switch things off when you’re done." if kind == "overview" else PAGES[kind][1]
-        )
+        self._headline.setText(PAGES[kind][0])
+        self._subtitle.setText(PAGES[kind][1])
         self._live.setVisible(kind in ("overview", "devices"))
-        self._scan.setVisible(kind in ("overview", "devices"))
 
     def _tab_changed(self, index: int) -> None:
         self._show_page(index)
@@ -629,15 +571,16 @@ class MainWindow(QMainWindow):
         for ip in self._devices:
             if ip in self._cards:
                 continue
-            card = PlugCard(ip)
+            card = DeviceControlRow(ip)
             self._connect_card(ip, card)
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, ip)
-            item.setSizeHint(QSize(250, t.DEVICE_HEIGHT))
+            item.setSizeHint(QSize(440, card.height()))
             self._list.addItem(item)
             self._list.setItemWidget(item, card)
             self._cards[ip] = card
         self._list.fit_cards()
+        mark_first(self._cards[self._list.item(i).data(Qt.ItemDataRole.UserRole)] for i in range(self._list.count()))
         if selected in self._devices:
             self._select_ip(selected)
         elif self._list.count():
@@ -648,9 +591,11 @@ class MainWindow(QMainWindow):
         online = sum(ip in self._state for ip in self._devices)
         total = sum(w for _, w in self._state.values())
         price = self._store.price_per_kwh()
-        cost = f" · {total / 1000 * price:.2f} / h" if price else ""
-        self._count.setText(f"DEVICES · {len(self._devices)} plugs · {online} online · {total:.1f} W now{cost}")
         enabled = self._controller is not None and not self._auth_required
+        self._devices_page.show_status(
+            count=len(self._devices), online=online, on=sum(on for on, _ in self._state.values()),
+            watts=total, price=price, enabled=enabled,
+        )
         self._scan.setEnabled(enabled and not self._scanning)
         self._scan.setText("Scanning…" if self._scanning else "Scan network")
         self._all_on.setEnabled(enabled and bool(self._devices))
@@ -706,7 +651,7 @@ class MainWindow(QMainWindow):
         if not self._can_send():
             return
         for ip in self._devices:
-            hours = self._window.currentData() or (1 if self._has_gap(ip) else 0)
+            hours = HISTORY_HOURS if self._window.currentData() else (1 if self._has_gap(ip) else 0)
             if hours:
                 self._fetch_long_ip(ip, hours)
 
@@ -743,9 +688,11 @@ class MainWindow(QMainWindow):
         if not self._devices:
             title = "No plugs yet"
         self._chart.show_lines([line for key, line in keyed_lines if self._toggles.shown(key)], title, span, interval)
-        live_lines = self._power_lines(0) if hours else keyed_lines
-        active = [(ip, line) for ip, line in live_lines if ip in self._state and self._state[ip][0]]
-        self._overview.show_power(active, "Live watts", None, REFRESH_MS / 1000)
+        if hours:  # the Overview follows the chosen range; plugs that are off still have history
+            active = [(ip, line) for ip, line in keyed_lines if ip in self._devices]
+        else:
+            active = [(ip, line) for ip, line in keyed_lines if ip in self._state and self._state[ip][0]]
+        self._overview.show_power(active, title, span, interval)
 
     def _power_lines(self, hours: int) -> list[tuple[str, Line]]:
         """Build data once per requested window; the dashboard always keeps its own live window."""
@@ -755,7 +702,7 @@ class MainWindow(QMainWindow):
         plugs = []  # (ip, readings, estimates)
         for ip in self._devices:
             if hours:
-                points = merge_power(self._long.get(ip, []), self._store.recent_samples(ip, now - span))
+                points = merge_power(self._long.get(ip, []), self._store.recent_samples(ip, now - HISTORY_HOURS * 3600))
                 estimates = fill_gaps(points, [], self._profile(ip), 450)
             else:
                 points = list(zip(self._times.get(ip, ()), self._samples.get(ip, ()), strict=True))
@@ -763,11 +710,24 @@ class MainWindow(QMainWindow):
                 if points:
                     estimates += fill_gaps(points, estimates, self._profile(ip), 2.5 * interval)
             plugs.append((ip, points, estimates))
+        horizon = (span if hours else SAMPLES * REFRESH_MS / 1000) / 4  # the forecast fills a quarter of the view
+        forecasts, holds = {}, {}  # a plug that is off, or has no usual day yet, holds its last reading
+        for ip, points, _ in plugs:
+            on = bool(points) and bool(self._state.get(ip, (False,))[0])
+            forecasts[ip] = forecast_power(points[-1], self._profile(ip), now, horizon) if on else []
+            holds[ip] = points[-1][1] if on else 0.0
         keyed_lines = []
         if plugs:  # the overall always sums every plug, shown or not
             total = total_series([points for _, points, _ in plugs], interval)
-            keyed_lines.append((OVERALL, Line("Overall", [t for t, _ in total], [w for _, w in total])))
+            grid = next((f for f in forecasts.values() if f), [])
+            ahead = [
+                (t, sum(f[i][1] if f else holds[ip] for ip, f in forecasts.items())) for i, (t, _) in enumerate(grid)
+            ]
+            times, watts = [t for t, _ in total], [w for _, w in total]
+            keyed_lines.append((OVERALL, Line("Overall", times, watts, None, (), ahead)))
         for ip, points, estimates in plugs:
             times, watts = [t for t, _ in points], [w for _, w in points]
-            keyed_lines.append((ip, Line(self._devices[ip].alias, times, watts, self._colors(ip), estimates)))
+            keyed_lines.append((ip, Line(
+                self._devices[ip].alias, times, watts, self._colors(ip), estimates, forecasts[ip],
+            )))
         return keyed_lines

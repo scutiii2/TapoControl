@@ -1,21 +1,19 @@
-"""Responsive native device grid; resizing keeps every card and signal connection alive."""
+"""Plug rows in one column; resizing keeps every row and signal connection alive."""
 
 from PySide6.QtCore import QSize
-from PySide6.QtWidgets import QGridLayout, QListView, QListWidget, QWidget
+from PySide6.QtWidgets import QListView, QListWidget, QVBoxLayout, QWidget
 
 from ui import tokens as t
-from ui.plug_card import PlugCard
+from ui.plug_card import PlugCard, mark_first
 
 
 class DeviceList(QListWidget):
-    """Selectable responsive cards with native keyboard navigation."""
+    """Selectable plug rows with native keyboard navigation."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.setViewMode(QListView.ViewMode.IconMode)
-        self.setFlow(QListView.Flow.LeftToRight)
+        self.setViewMode(QListView.ViewMode.ListMode)
         self.setMovement(QListView.Movement.Static)
-        self.setWrapping(True)
         self.setSpacing(t.SP_SM)
         self.setResizeMode(QListView.ResizeMode.Adjust)
 
@@ -24,54 +22,35 @@ class DeviceList(QListWidget):
         self.fit_cards()
 
     def fit_cards(self) -> None:
-        width = self.viewport().width()
-        limit = 2 if width < 840 else 4
-        columns = max(1, min(limit, width // (t.DEVICE_MIN_WIDTH + 2 * self.spacing())))
-        card_width = max(1, width // columns - 2 * self.spacing() - 2)
+        width = max(1, self.viewport().width() - 2 * self.spacing() - 2)
         for index in range(self.count()):
-            self.item(index).setSizeHint(QSize(card_width, t.DEVICE_HEIGHT))
+            item = self.item(index)
+            card = self.itemWidget(item)
+            item.setSizeHint(QSize(width, card.height() if card else t.DEVICE_HEIGHT))
 
 
 class DeviceGrid(QWidget):
+    """A column of plug rows."""
+
     def __init__(self) -> None:
         super().__init__()
         self.cards: dict[str, PlugCard] = {}
-        self.columns = 0
-        self._grid = QGridLayout(self)
-        self._grid.setContentsMargins(0, 0, 0, 0)
-        self._grid.setSpacing(t.CARD_GAP)
+        self._column = QVBoxLayout(self)
+        self._column.setContentsMargins(0, 0, 0, 0)
+        self._column.setSpacing(0)
 
     def sync(self, keys: list[str]) -> list[tuple[str, PlugCard]]:
-        """Return only newly created cards so callers connect each signal once."""
+        """Return only newly created rows so callers connect each signal once."""
         for key in self.cards.keys() - set(keys):
             card = self.cards.pop(key)
-            self._grid.removeWidget(card)
+            self._column.removeWidget(card)
             card.deleteLater()
         added = []
         for key in keys:
             if key not in self.cards:
-                card = PlugCard(key)
+                card = PlugCard(key, actions=False)  # the Devices page carries rename, energy and timer
                 self.cards[key] = card
+                self._column.addWidget(card)
                 added.append((key, card))
-        self._reflow(force=True)
+        mark_first(self.cards[key] for key in keys)
         return added
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._reflow()
-
-    def _reflow(self, force: bool = False) -> None:
-        limit = 2 if self.width() < 840 else 4
-        columns = max(1, min(limit, (self.width() + t.CARD_GAP) // (t.DEVICE_MIN_WIDTH + t.CARD_GAP)))
-        if columns == self.columns and not force:
-            return
-        previous = self.columns
-        self.columns = columns
-        while self._grid.count():
-            self._grid.takeAt(0)
-        for col in range(max(previous, columns)):
-            self._grid.setColumnStretch(col, 1 if col < columns else 0)
-        for index, card in enumerate(self.cards.values()):
-            self._grid.addWidget(card, index // columns, index % columns)
-        rows = (len(self.cards) + columns - 1) // columns
-        self.setMinimumHeight(rows * t.DEVICE_HEIGHT + max(0, rows - 1) * t.CARD_GAP)

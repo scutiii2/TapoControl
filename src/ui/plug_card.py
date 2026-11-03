@@ -1,9 +1,9 @@
-"""Plug cards with confirmed power state and keyboard-accessible controls."""
+"""Plug rows with confirmed power state and keyboard-accessible controls."""
 import math
 from collections.abc import Sequence
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
+from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractButton,
     QFrame,
@@ -13,22 +13,39 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QToolButton,
     QVBoxLayout,
-    QWidget,
 )
 
 from ui import tokens as t
+from ui.interaction import Fade, contains, poller
 from ui.theme import theme
 from ui.side_tabs import nav_icon
 
 
 class PowerSwitch(QAbstractButton):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, large: bool = False):
         super().__init__(parent)
         self.setCheckable(True)
-        self.setFixedSize(40, 32)
+        self._large = large
+        if large:
+            self.setFixedSize(52, 44)
+        else:
+            self.setFixedSize(40, 32)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._hover = Fade(self)
+        poller(self)
         theme().changed.connect(self.update)
+
+    def enterEvent(self, event) -> None:
+        self._hover.to(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hover.to(0.0)
+        super().leaveEvent(event)
+
+    def poll_hover(self, under, position) -> None:
+        self._hover.to(1.0 if contains(self, under) else 0.0)
 
     def paintEvent(self, event) -> None:
         c = theme().colors
@@ -36,17 +53,29 @@ class PowerSwitch(QAbstractButton):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         track = c.accent if self.isChecked() else ("#cbd3cb" if c.background == "#f6f8f5" else c.control)
+        hover = self._hover.value if self.isEnabled() else 0.0
         painter.setOpacity(1 if self.isEnabled() else 0.45)
+        left = 26 if self.isChecked() else 6
+        if self._large:
+            track_rect, thumb, ring = QRectF(3, 9, 46, 26), QRectF(left, 12, 20, 20), (1, 5, 50, 34, 8)
+        else:
+            left = 20 if self.isChecked() else 6
+            track_rect, thumb, ring = QRectF(3, 6, 34, 20), QRectF(left, 9, 14, 14), (1, 2, 38, 28, 7)
         painter.setBrush(QColor(track))
-        painter.drawRoundedRect(QRectF(3, 6, 34, 20), 10, 10)
-        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(track_rect, track_rect.height() / 2, track_rect.height() / 2)
+        if hover:  # the track darkens a little and the thumb swells
+            shade = QColor(c.text)
+            shade.setAlphaF(0.12 * hover)
+            painter.setBrush(shade)
+            painter.drawRoundedRect(track_rect, track_rect.height() / 2, track_rect.height() / 2)
         painter.setBrush(QColor("#ffffff"))
-        painter.drawEllipse(QRectF(20 if self.isChecked() else 6, 9, 14, 14))
-        if self.hasFocus():
+        painter.drawEllipse(thumb.adjusted(-1.5 * hover, -1.5 * hover, 1.5 * hover, 1.5 * hover))
+        if self.hasFocus() and self.property("kbd"):
             painter.setOpacity(1)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(QColor(c.accent), 2))
-            painter.drawRoundedRect(QRectF(1, 2, 38, 28), 7, 7)
+            x, y, width, height, radius = ring
+            painter.drawRoundedRect(QRectF(x, y, width, height), radius, radius)
 
 
 TIMERS = (
@@ -67,35 +96,6 @@ def timer_note(remaining_seconds: float, on: bool) -> str:
 
 def hourly_cost(watts: float, price_per_kwh: float) -> float:
     return watts / 1000 * price_per_kwh
-
-
-class Sparkline(QWidget):
-    """Recent watts of one plug, scaled to its own range."""
-
-    def __init__(self):
-        super().__init__()
-        self.setFixedSize(84, 30)
-        self._values: Sequence[float] = ()
-        theme().changed.connect(self.update)
-
-    def set_values(self, values: Sequence[float]) -> None:
-        self._values = list(values)
-        self.update()
-
-    def paintEvent(self, event) -> None:
-        if len(self._values) < 2:
-            return
-        lo, hi = min(self._values), max(self._values)
-        span = (hi - lo) or 1.0
-        step = (self.width() - 4) / (len(self._values) - 1)
-        points = QPolygonF([
-            QPointF(2 + i * step, self.height() - 3 - (v - lo) / span * (self.height() - 6))
-            for i, v in enumerate(self._values)
-        ])
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(theme().colors.accent), 1.5))
-        painter.drawPolyline(points)
 
 
 class ElidedLabel(QLabel):
@@ -123,12 +123,10 @@ class PlugCard(QFrame):
     timer_requested = Signal(int, bool)  # minutes, switch on
     timer_cancelled = Signal()
 
-    def __init__(self, ip: str):
+    def __init__(self, ip: str, actions: bool = True):
         super().__init__()
         self.setObjectName("DeviceCard")
-        self.setProperty("card", True)
         self.setFixedHeight(t.DEVICE_HEIGHT)
-        self.setMinimumWidth(t.DEVICE_MIN_WIDTH)
         self._on = False
         self._icon_kind = "devices"
         self._name = ElidedLabel()
@@ -138,22 +136,25 @@ class PlugCard(QFrame):
         self._ip.setProperty("tone", "muted")
         self._ip.setTextFormat(Qt.TextFormat.PlainText)
         self._ip.hide()  # Available in the action tooltip; timers get their own visible line.
-        self._status = QLabel()
-        self._status.setProperty("role", "caption")
         self._watts = QLabel()
         self._watts.setProperty("role", "device-value")
+        self._watts.setFixedWidth(t.DEVICE_FIGURE_WIDTH)
+        self._watts.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._cost = QLabel()
         self._cost.setProperty("role", "caption")
         self._cost.hide()
-        self.today = QLabel("— kWh today")
-        self.today.setProperty("role", "caption")
+        self._pill = QLabel()
+        self._pill.setProperty("role", "pill")
+        self._pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._pill.setFixedWidth(t.DEVICE_PILL_WIDTH)
+        self.today = QLabel("— kWh today", self)  # read by tests and tooltips; the row shows it in Today by plug
+        self.today.hide()
         self._timer_label = QLabel()
         self._timer_label.setProperty("role", "caption")
         self._timer_label.hide()
         self._icon = QLabel()
-        self._icon.setFixedSize(35, 35)
+        self._icon.setFixedSize(32, 32)
         self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._icon.setStyleSheet("background: #eff3ec; border-radius: 10px;")
         self._icon.setPixmap(nav_icon("devices", "#547454", "#547454").pixmap(19, 19))
         self.toggle = PowerSwitch(self)
         self.toggle.setAccessibleName(f"Power for {ip}")
@@ -162,50 +163,36 @@ class PlugCard(QFrame):
         menu.addAction("Rename…", self.rename_requested.emit)
         menu.addAction("Energy…", self.energy_requested.emit)
         timer = menu.addMenu("Timer")
+        self._timer_menu = timer
         for label, minutes, on in TIMERS:
             timer.addAction(label, lambda m=minutes, o=on: self.timer_requested.emit(m, o))
         timer.addSeparator()
         timer.addAction("Cancel timer", self.timer_cancelled.emit)
         self._menu = QToolButton()
-        self._menu.setText("Details ↗")
+        self._menu.setText("…")
         self._menu.setAccessibleName(f"Actions for {ip}")
         self._menu.setToolTip("Rename, energy or timer")
         self._menu.setMenu(menu)
         self._menu.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._menu.setProperty("quiet", True)
+        self._menu.setStyleSheet("font-size: 16px; font-weight: 600;")  # the dots are the only way to the row actions
         self._menu.setFixedHeight(24)
-        row = QVBoxLayout(self)
-        row.setContentsMargins(t.DEVICE_PAD, t.DEVICE_PAD, t.DEVICE_PAD, t.DEVICE_PAD)
-        row.setSpacing(t.SP_XS)
-        top = QHBoxLayout()
-        top.setSpacing(t.SP_SM)
-        top.addWidget(self._icon)
-        top.addStretch()
-        top.addWidget(self.toggle)
-        row.addLayout(top)
-        row.addSpacing(t.SP_SM)
-        row.addWidget(self._name)
-        row.addWidget(self._status)
-        row.addWidget(self._timer_label)
-        row.addStretch()
-        watts = QHBoxLayout()
-        watts.setSpacing(t.SP_XS)
-        watts.addWidget(self._watts)
-        unit = QLabel("W")
-        unit.setProperty("role", "caption")
-        watts.addWidget(unit, 0, Qt.AlignmentFlag.AlignBottom)
-        watts.addStretch()
-        row.addLayout(watts)
-        row.addSpacing(t.SP_SM)
-        self._divider = QFrame()
-        self._divider.setFrameShape(QFrame.Shape.HLine)
-        self._divider.setFixedHeight(1)
-        row.addWidget(self._divider)
-        footer = QHBoxLayout()
-        footer.setSpacing(t.SP_XS)
-        footer.addWidget(self.today, 1)
-        footer.addWidget(self._menu)
-        row.addLayout(footer)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(t.PANEL_X, 0, t.PANEL_X, 0)
+        row.setSpacing(t.SP_LG)
+        row.addWidget(self._icon)
+        text = QVBoxLayout()
+        text.setSpacing(t.SP_XS)
+        text.addStretch()
+        text.addWidget(self._name)
+        text.addWidget(self._timer_label)
+        text.addStretch()
+        row.addLayout(text, 1)
+        row.addWidget(self._pill, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self._watts)
+        row.addWidget(self._menu)
+        self._menu.setVisible(actions)
+        row.addWidget(self.toggle)
         theme().changed.connect(self._apply_theme)
         self._apply_theme()
 
@@ -214,7 +201,6 @@ class PlugCard(QFrame):
 
     def _apply_theme(self) -> None:
         c = theme().colors
-        self._divider.setStyleSheet(f"background: {c.border}; border: none;")
         self._icon.setStyleSheet(f"background: {c.raised}; border-radius: 10px;")
         self._icon.setPixmap(nav_icon(self._icon_kind, c.accent, c.accent).pixmap(19, 19))
 
@@ -249,10 +235,9 @@ class PlugCard(QFrame):
         self._name.setTextFormat(Qt.TextFormat.PlainText)
         self._on = bool(state and state[0])
         status = "On" if self._on else "Off" if state else "Offline"
-        dot = "#379567" if state else "#a5ada6"
-        self._status.setText(f'<span style="color: {dot}">●</span>  {status} · P110')
-        self._status.setProperty("tone", "success" if self._on else "muted")
-        self._watts.setText(f"{state[1]:.1f}" if state else "—")
+        self._pill.setText(status)
+        self._pill.setProperty("state", status.lower())
+        self._watts.setText(f"{state[1]:.1f} W" if state else "—")
         self._cost.setText(f"{hourly_cost(state[1], price):.2f} / h" if state and price else "")
         self.toggle.setChecked(self._on)
         self.toggle.setEnabled(state is not None and not busy)
@@ -267,5 +252,42 @@ class PlugCard(QFrame):
             for label in self.findChildren(QLabel):
                 label.style().unpolish(label)
                 label.style().polish(label)
-        self._status.style().unpolish(self._status)
-        self._status.style().polish(self._status)
+        self._pill.style().unpolish(self._pill)
+        self._pill.style().polish(self._pill)
+
+
+def mark_first(cards) -> None:
+    """Only the first row of a table loses its top separator, so the panel's rounded border stays whole."""
+    for index, card in enumerate(cards):
+        if bool(card.property("first")) != (index == 0):
+            card.setProperty("first", index == 0)
+            card.style().unpolish(card)
+            card.style().polish(card)
+
+
+class DeviceControlRow(PlugCard):
+    """The Overview row plus a timer button, so the Devices page looks the same as Overview."""
+
+    def __init__(self, ip: str):
+        super().__init__(ip)
+        self._timer_button = QToolButton()
+        self._timer_button.setProperty("quiet", True)
+        self._timer_button.setIconSize(QSize(16, 16))
+        self._timer_button.setFixedSize(28, 24)
+        self._timer_button.setAccessibleName(f"Timer for {ip}")
+        self._timer_button.setToolTip("Set or cancel timer")
+        self._timer_button.setMenu(self._timer_menu)
+        self._timer_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        row = self.layout()
+        row.insertWidget(row.indexOf(self._menu), self._timer_button)
+        theme().changed.connect(self._restyle_timer)
+        self._restyle_timer()
+
+    def _restyle_timer(self) -> None:
+        c = theme().colors
+        self._timer_button.setIcon(nav_icon("timer", c.muted, c.accent))
+
+    def update_state(self, name, state, selected, busy, samples=(), price=0.0, note="") -> None:
+        super().update_state(name, state, selected, busy, samples, price, note)
+        self._timer_button.setEnabled(state is not None and not busy)
+        self._timer_button.setAccessibleName(f"Timer for {name}")

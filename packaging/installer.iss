@@ -10,6 +10,7 @@ OutputBaseFilename=TapoControl-Setup
 Compression=lzma
 SolidCompression=yes
 UninstallDisplayIcon={app}\TapoControl.exe
+SetupIconFile=TapoControl.ico
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"

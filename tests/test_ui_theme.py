@@ -20,8 +20,7 @@ def test_palettes_keep_small_text_readable():
         colors = palette_for(dark)
         for background in (colors.background, colors.surface, colors.selected):
             assert contrast(colors.text, background) >= 4.5
-            # The approved light reference uses softer secondary ink; primary text stays 4.5:1.
-            assert contrast(colors.muted, background) >= (4.5 if dark else 3)
+            assert contrast(colors.muted, background) >= 4.5
         assert contrast(colors.accent_text, colors.accent) >= 4.5
 
 

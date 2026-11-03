@@ -19,6 +19,8 @@ if (-not $SkipTests) { & $Py -m pytest -q; if ($LASTEXITCODE) { throw "tests fai
 # A running copy locks its files in dist and breaks the clean step.
 Get-Process TapoControl -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1
+& $Py packaging/make_icon.py  # keep the exe icon in step with the in-app logo
+if ($LASTEXITCODE) { throw "icon build failed" }
 & $Py -m PyInstaller packaging/build.spec --noconfirm
 if ($LASTEXITCODE) { throw "PyInstaller failed" }
 

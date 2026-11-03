@@ -25,6 +25,7 @@ exe = EXE(
     debug=False,
     upx=False,
     console=False,
+    icon=os.path.join(SPECPATH, "TapoControl.ico"),
 )
 
 coll = COLLECT(exe, a.binaries, a.datas, name="TapoControl", upx=False)

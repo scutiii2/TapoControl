@@ -9,9 +9,9 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 import keyring
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtGui import QCloseEvent, QFontDatabase
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from core.controller import AuthError, EnergySummary, UsageSummary
 from core.store import DeviceInfo, Store
@@ -117,6 +117,7 @@ def window(app, monkeypatch):
     w.hide()
     runner.close()
     w.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     app.processEvents()
     store.close()
 
@@ -181,8 +182,8 @@ def test_auth_failure_uses_account_tab_and_resumes_after_submission(window, monk
     assert not w._auth_required
     assert w._timer.isActive()
     assert not w._login.password.text()
-    assert w._tabs.currentIndex() == 0
-    assert len(runner.pending) == 6  # a snapshot, and energy and hours for the Overview, per plug
+    assert w._tabs.currentIndex() == 1
+    assert len(runner.pending) == 4  # snapshots and today's device energy, per plug
 
 
 def test_initial_account_tab_submission_scans_when_no_devices(window, monkeypatch):
@@ -198,7 +199,7 @@ def test_initial_account_tab_submission_scans_when_no_devices(window, monkeypatc
     w._login.password.setText("fake-password")
     w._login._accept()
     runner.finish()
-    assert w._tabs.currentIndex() == 0
+    assert w._tabs.currentIndex() == 1
 
 
 def test_new_account_ignores_old_energy_and_snapshot_auth_errors(window, monkeypatch):
@@ -273,7 +274,6 @@ def test_tab_energy_actions_and_live_theme_changes(window):
     for scheme in (Qt.ColorScheme.Dark, Qt.ColorScheme.Light):
         theme().apply(scheme)
         assert w._chart._lines[0].pen().color().name() == theme().colors.text
-        assert w._history._chart._series[0].pen().color().name() == theme().colors.text
 
 
 def test_card_rename_and_all_power_keep_existing_actions(window, monkeypatch):
@@ -338,7 +338,7 @@ def test_long_chart_window_fetches_plug_history_and_ignores_failure(window):
     w, runner, controller = window
     w._window.setCurrentIndex(1)  # last hour
     runner.finish()
-    assert ("power", w._selected_ip(), 1) in controller.calls
+    assert ("power", w._selected_ip(), 24) in controller.calls  # a day, so the chart can scroll back
     assert w._chart._names == ["Overall", "Desk", "Lamp"]
     assert [w for _, w in w._chart._points[0]] == [60.0, 80.0]  # overall: both plugs summed
     assert "average watts" in w._chart.chart().title()
@@ -383,11 +383,13 @@ def test_energy_chart_sums_plugs_and_toggles_lines(window):
     runner.finish()
     runner.finish()
     assert panel._today.text() == "0.84 kWh"  # both plugs added up
-    assert [line.name for line in panel._chart._lines] == ["Overall", "Desk", "Lamp"]
-    assert panel._chart._lines[0].wh == [840]
-    panel._toggles._boxes["192.168.1.2"].setChecked(False)
-    assert [line.name for line in panel._chart._lines] == ["Overall", "Lamp"]
-    assert panel._chart._lines[0].wh == [840]  # the overall still sums the hidden plug
+    assert [line.name for line in panel._chart._lines] == ["Desk", "Lamp"]  # one stacked segment per plug
+    assert panel._chart._totals() == [840]  # the whole bar is the overall
+    desk = panel._chart._lines[0].wh[0]
+    panel._toggles._boxes["192.168.1.2"].setChecked(False)  # filtering a plug out restacks the rest
+    assert [line.name for line in panel._chart._lines] == ["Lamp"]
+    assert panel._chart._totals() == [840 - desk]
+    assert panel._today.text() == "0.84 kWh"  # the summary cards still count every plug
     assert panel._colors("192.168.1.3") == w._colors("192.168.1.3")  # same color on both tabs
 
 
@@ -397,7 +399,7 @@ def test_energy_follows_renames_and_clears_when_plugs_change(window):
     panel.load(controller, {"192.168.1.2": "Desk", "192.168.1.3": "Lamp"})
     runner.finish()
     assert not panel.set_names({"192.168.1.2": "Desk 2", "192.168.1.3": "Lamp"})
-    assert [line.name for line in panel._chart._lines][1] == "Desk 2"
+    assert [line.name for line in panel._chart._lines][0] == "Desk 2"
     assert panel.set_names({"192.168.1.2": "Desk 2"})
     assert not panel._names
 
@@ -452,6 +454,7 @@ def test_csv_export_writes_shown_rows(window, monkeypatch, tmp_path):
     panel._range.setCurrentIndex(3)  # all time, monthly
     assert panel._export.isEnabled()
     panel._export_csv()
+    runner.finish()
     assert target.read_text(encoding="utf-8").splitlines()[0] == "month,kWh,cost"
     assert "days stored since" in panel._detail.text()
 
@@ -519,6 +522,30 @@ def test_sidebar_collapse_preserves_page_and_keyboard_labels(app):
     tabs.hide()
 
 
+@pytest.mark.parametrize("scheme", [Qt.ColorScheme.Light, Qt.ColorScheme.Dark])
+@pytest.mark.parametrize("collapsed", [False, True])
+def test_sidebar_footer_controls_align_with_navigation(window, app, scheme, collapsed):
+    w, _, _ = window
+    sidebar = w._tabs
+    theme().apply(scheme)
+    sidebar.set_collapsed(collapsed)
+    w.show()
+    app.processEvents()
+    navigation = sidebar._buttons[0]
+    for button in (*sidebar._buttons, sidebar.theme_button, sidebar.collapse_button):
+        assert button.size() == navigation.size()
+        assert button.iconSize() == navigation.iconSize()
+        assert button.geometry().left() == navigation.geometry().left()
+        assert button.toolButtonStyle() == navigation.toolButtonStyle()
+    assert sidebar.collapse_button.text() == ("Expand sidebar" if collapsed else "Collapse sidebar")
+    selected = sidebar.currentWidget()
+    sidebar.theme_button.click()
+    assert sidebar.currentWidget() is selected
+    sidebar.collapse_button.click()
+    assert sidebar.currentWidget() is selected
+    theme().set_mode("light")
+
+
 def test_overview_controls_target_plug_and_wait_for_confirmation(window):
     w, runner, controller = window
     card = w._overview.device_cards["192.168.1.3"]
@@ -553,7 +580,7 @@ def test_overview_does_not_report_zero_when_no_plugs_answer(window):
     assert "Waiting" in w._overview._now_cost.text()
 
 
-def test_overview_collapsed_sidebar_reflows_cards_without_replacing_them(window, app):
+def test_overview_collapsed_sidebar_keeps_rows_without_replacing_them(window, app):
     w, _, _ = window
     w.show()
     w.resize(1440, 1060)
@@ -564,7 +591,6 @@ def test_overview_collapsed_sidebar_reflows_cards_without_replacing_them(window,
     app.processEvents()
     assert w._overview.device_cards["192.168.1.3"] is before
     assert before.toggle.geometry().right() < before.width()
-    assert w._overview._grid.columns <= 2
 
 
 def test_overview_long_alias_and_many_plugs_remain_scrollable(window, app):
@@ -602,12 +628,15 @@ def test_live_chart_scaling_preserves_detail_at_typical_plug_load(app):
     assert chart._y.tickCount() == 4
 
 
-def test_overview_live_window_is_independent_of_devices_history(window):
+def test_overview_range_buttons_share_the_chart_range(window):
     w, _, _ = window
-    w._window.setCurrentIndex(1)
-    assert w._chart._span == 3600
     assert w._overview._chart._span == 600
-    assert w._overview._range.text() == "Last 10 minutes"
+    w._overview._ranges.button(1).click()
+    assert w._window.currentIndex() == 1
+    assert w._chart._span == 3600 and w._overview._chart._span == 3600
+    w._window.setCurrentIndex(0)
+    assert w._overview._ranges.button(0).isChecked()
+    assert w._overview._chart._span == 600
 
 
 def test_overview_keeps_confirmed_zero_watt_readings(window):
@@ -664,16 +693,13 @@ def test_overview_shows_totals_and_fetches_once_a_minute(window):
     assert not any(c[0] == "energy" for c in controller.calls)  # nothing fetched while the Overview is closed
 
 
-def test_header_names_the_open_page_and_scan_belongs_to_plug_pages(window):
+def test_headline_names_the_open_page(window):
     w, _, _ = window
     seen = {}
     for index in range(5):
         w._tabs.setCurrentIndex(index)
-        seen[w._tabs.kind(index)] = (w._title.text(), w._scan.isHidden())
-    assert seen == {
-        "overview": ("Overview", False), "devices": ("Devices", False), "energy": ("Energy", True),
-        "account": ("Account", True), "settings": ("Settings", True),
-    }
+        seen[w._tabs.kind(index)] = w._headline.text()
+    assert list(seen.values()) == ["Overview", "Devices", "Energy", "Account", "Settings"]
 
 
 def test_scan_shows_pending_state_and_recovers_on_failure(window):
@@ -713,3 +739,349 @@ def test_toggle_swatches_follow_the_theme(app):
         app.processEvents()
         seen.append(box.grab().toImage().pixelColor(3, box.height() // 2).name())
     assert seen == [DARK.text, LIGHT.text]  # the overall wears the text color on each theme
+
+
+def test_theme_toggle_flips_scheme_and_buttons_get_pointer_cursor(app):
+    theme().set_mode("light")
+    theme().cycle()
+    assert (theme().mode, theme().dark) == ("dark", True)
+    theme().cycle()
+    assert theme().mode == "system"
+    theme().set_mode("light")
+    button = QPushButton()
+    button.ensurePolished()
+    assert button.cursor().shape() == Qt.CursorShape.PointingHandCursor
+
+
+def test_clickable_widgets_show_pointer_and_animate_hover_and_press(app):
+    theme()  # the application-wide filter that adds cursors and hover layers lives on the theme
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QEnterEvent, QMouseEvent
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QComboBox
+
+    from ui.interaction import PressOverlay
+
+    button = QPushButton("Go")
+    button.resize(80, 32)
+    button.ensurePolished()
+    overlay = button.findChild(PressOverlay)
+    assert overlay and overlay._hover.value == 0
+    app.sendEvent(button, QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
+    QTest.qWait(250)
+    assert overlay._hover.value == 1
+    press = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(5, 5), Qt.MouseButton.LeftButton,
+                        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    app.sendEvent(button, press)
+    QTest.qWait(250)
+    assert overlay._press.value == 1
+    button.setEnabled(False)
+    assert button.cursor().shape() == Qt.CursorShape.ArrowCursor
+    combo = QComboBox()
+    combo.ensurePolished()
+    assert combo.cursor().shape() == Qt.CursorShape.PointingHandCursor
+
+
+def test_hover_animates_on_switches_and_steppers_and_follows_the_cursor_under_a_popup(app):
+    theme()  # the application-wide filter that adds cursors and hover layers lives on the theme
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    from ui.interaction import PressOverlay
+    from ui.page_layout import IntBox
+    from ui.plug_card import PowerSwitch
+
+    switch = PowerSwitch()
+    switch.show()
+    switch.enterEvent(None)
+    QTest.qWait(250)
+    assert switch._hover.value == 1
+    switch.leaveEvent(None)
+    QTest.qWait(250)
+    assert switch._hover.value == 0
+
+    box = IntBox(maximum=10)
+    box.show()
+    up = box._button_rects()["up"]
+    box._hover_button(up.center())
+    assert box.cursor().shape() == Qt.CursorShape.PointingHandCursor and box._fades["up"].goal == 1
+    box._hover_button(None)
+    assert box._fades["up"].goal == 0 and box.cursor().shape() != Qt.CursorShape.PointingHandCursor
+
+    button = QPushButton("Go")
+    button.show()
+    button.ensurePolished()
+    overlay = button.findChild(PressOverlay)
+    overlay.poll_hover(button, QPoint())  # a dropdown is open, so Qt sends no Enter event; the poller reports it
+    assert overlay._hover.goal == 1
+    overlay.poll_hover(None, QPoint())
+    assert overlay._hover.goal == 0
+    for widget in (switch, box, button):
+        widget.close()
+
+
+def test_split_button_runs_main_action_and_opens_menu_that_turns_the_chevron(app):
+    theme()  # the application-wide filter that adds cursors and hover layers lives on the theme
+    from PySide6.QtTest import QTest
+
+    from ui.split_button import SplitButton
+
+    ran = []
+    split = SplitButton("Export CSV…")
+    split.add_action("Copy CSV to clipboard", lambda: ran.append("copy"))
+    split.main.clicked.connect(lambda: ran.append("main"))
+    split.show()
+    QTest.qWaitForWindowActive(split)
+    split.main.click()
+    assert ran == ["main"]
+    split.main.setEnabled(False)
+    assert not split.arrow.isEnabled()
+    split.main.setEnabled(True)
+    assert split.arrow.isEnabled() and split.arrow.accessibleName() == "More options for Export CSV"
+    split.arrow.click()
+    QTest.qWait(400)
+    assert split.menu.isVisible() and split.arrow.angle == 180
+    split.menu.actions()[0].trigger()
+    split.menu.hide()
+    QTest.qWait(400)
+    assert ran == ["main", "copy"] and split.arrow.angle == 0
+
+
+def test_devices_rows_look_like_overview_rows_and_keep_their_size_when_the_chart_hides(window):
+    w, _, _ = window
+    device = w._cards["192.168.1.2"]
+    compact = w._overview.device_cards["192.168.1.2"]
+    assert device._timer_button.menu() is not None
+    assert device.height() == compact.height() == 48
+    assert device.toggle.size() == compact.toggle.size()
+    assert device.cursor().shape() != Qt.CursorShape.PointingHandCursor
+    before = device.height()
+    w._devices_page.chart_toggle.click()
+    assert w._devices_page.chart_body.isHidden()
+    assert device.height() == before
+    w._devices_page.chart_toggle.click()
+    assert not w._devices_page.chart_body.isHidden()
+
+
+def test_energy_filter_controls_totals_and_export_without_new_requests(window):
+    w, runner, controller = window
+    panel = w._history
+    panel.load(controller, {ip: d.alias for ip, d in w._devices.items()})
+    runner.finish()
+    runner.finish()
+    assert panel._today.text() == "0.84 kWh"
+    assert panel._cost_today.text() == "—"
+    pending = len(runner.pending)
+    panel._device_filter.setCurrentIndex(1)
+    assert panel._today.text() == "0.42 kWh"
+    assert sum(wh for _, wh in panel._shown[0]) == 420
+    assert len(runner.pending) == pending
+    panel._price.setValue(10)
+    assert panel._cost_today.text() == "4.20"
+    panel._device_filter.setCurrentIndex(0)
+    assert panel._cost_today.text() == "8.40"
+
+
+def test_energy_partial_totals_are_explicit_and_clear_resets_costs(window):
+    w, _, controller = window
+    panel = w._history
+    panel.load(controller, {ip: d.alias for ip, d in w._devices.items()})
+    panel._on_summary("192.168.1.2", EnergySummary(1000, 5000), None)
+    assert "1 of 2" in panel._coverage.text()
+    panel._price.setValue(10)
+    assert panel._cost_today.text() == "10.00"
+    panel.clear()
+    assert panel._cost_today.text() == "—"
+    assert panel._breakdown.note.text() == "Waiting for energy readings"
+
+
+def test_settings_theme_selector_tracks_sidebar_and_persists(window):
+    w, _, _ = window
+    w._settings.appearance.setCurrentIndex(w._settings.appearance.findData("dark"))
+    assert theme().mode == "dark"
+    assert w._store.setting("theme") == "dark"
+    w._tabs.theme_button.click()
+    assert w._settings.appearance.currentData() == theme().mode
+    assert w._store.setting("theme") == theme().mode
+    theme().set_mode("light")
+
+
+def test_signin_opens_devices_and_preserves_overview_fetch_on_visit(window, monkeypatch):
+    w, runner, _ = window
+    monkeypatch.setattr(keyring, "set_password", lambda *_: None)
+    w._login.email.setText("test@example.invalid")
+    w._login.password.setText("fake-password")
+    w._login._accept()
+    assert w._tabs.kind(w._tabs.currentIndex()) == "devices"
+    assert len(runner.pending) == 4  # power snapshot and device energy per plug
+    w._tabs.setCurrentWidget(w._overview)
+    assert len(runner.pending) == 10  # Overview retains its energy/hour/day fetches
+
+
+@pytest.mark.parametrize("collapsed", [False, True])
+@pytest.mark.parametrize("page_index", [1, 2, 3, 4])
+def test_control_pages_keep_actions_inside_small_window(window, app, collapsed, page_index):
+    w, _, _ = window
+    w._devices["192.168.1.2"] = DeviceInfo("192.168.1.2", "Very long device name " * 20, "P110")
+    w._render()
+    w._tabs.set_collapsed(collapsed)
+    w._tabs.setCurrentIndex(page_index)
+    w.resize(760, 640)
+    w.show()
+    for _ in range(3):
+        app.processEvents()
+    page = w._tabs.currentWidget()
+    assert page.horizontalScrollBar().maximum() == 0
+    controls = {
+        1: [w._cards["192.168.1.2"].toggle, w._cards["192.168.1.2"]._timer_button],
+        2: [w._history._device_filter, w._history._range, w._history._export],
+        3: [w._login.email, w._login.password, w._login._submit],
+        4: [w._settings.appearance, w._settings.watts, w._settings.minutes, w._settings.offline],
+    }
+    for control in controls[page_index]:
+        right = control.mapTo(page.viewport(), control.rect().topRight()).x()
+        assert 0 < right < page.viewport().width()
+
+
+def test_direct_timer_menu_runs_existing_async_action(window):
+    w, runner, controller = window
+    card = w._cards["192.168.1.2"]
+    card._timer_button.menu().actions()[1].trigger()
+    runner.finish()
+    assert ("timer", "192.168.1.2", 30, False) in controller.calls
+
+
+def test_export_keeps_snapshot_and_prevents_duplicate_jobs(window, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QFileDialog
+
+    w, runner, controller = window
+    panel = w._history
+    panel.load(controller, {ip: d.alias for ip, d in w._devices.items()})
+    runner.finish()
+    runner.finish()
+    target = tmp_path / "filtered.csv"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), ""))
+    panel._device_filter.setCurrentIndex(1)
+    panel._price.setValue(10)
+    panel._export_csv()
+    panel._device_filter.setCurrentIndex(0)
+    panel._price.setValue(20)
+    assert not panel._export.isEnabled()
+    pending = len(runner.pending)
+    panel._export_csv()
+    assert len(runner.pending) == pending
+    runner.finish()
+    assert panel._export.isEnabled()
+    assert target.read_text(encoding="utf-8").splitlines()[1].endswith(",0.420,4.20")
+
+
+def test_stale_export_error_does_not_pollute_new_selection(window, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QFileDialog
+
+    w, runner, _ = window
+    panel = w._history
+    panel._shown = ([(date(2026, 11, 1), 420)], "day")
+    target = tmp_path / "old.csv"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), ""))
+    panel._export_csv()
+    coro, callback = runner.pending.pop()
+    coro.close()
+    panel.clear()
+    callback(None, OSError("old error"))
+    assert not panel._exporting
+    assert panel._history_error.isHidden()
+    assert not panel._export.isEnabled()
+
+
+def test_split_button_halves_have_the_same_height(app):
+    from ui import tokens
+    from ui.split_button import SplitButton
+
+    theme()
+    split = SplitButton("Export CSV…")
+    split.show()
+    app.processEvents()
+    assert split.main.height() == split.arrow.height() == tokens.SPLIT_HEIGHT
+    split.close()
+
+
+def test_focus_ring_shows_only_after_keyboard_focus(app):
+    theme()
+    from PySide6.QtTest import QTest
+
+    button = QPushButton("Go")
+    button.show()
+    QTest.qWaitForWindowActive(button)  # focus events only arrive in an active window
+    button.setFocus(Qt.FocusReason.MouseFocusReason)
+    assert not button.property("kbd")
+    button.clearFocus()
+    button.setFocus(Qt.FocusReason.TabFocusReason)
+    assert button.property("kbd")
+    button.clearFocus()
+    assert not button.property("kbd")
+    button.close()
+
+
+def test_poller_applies_the_pointer_under_the_cursor_while_a_popup_owns_the_mouse(app):
+    from PySide6.QtWidgets import QApplication
+
+    from ui.interaction import _poller
+
+    theme()
+    button = QPushButton("Go")
+    button.ensurePolished()
+    _poller._follow_cursor(button)
+    assert QApplication.overrideCursor().shape() == Qt.CursorShape.PointingHandCursor
+    _poller._follow_cursor(None)
+    assert QApplication.overrideCursor() is None
+
+
+def test_usage_chart_pans_through_a_window_and_marks_the_forecast(app):
+    from datetime import timedelta
+    from ui.charts import UsageChart, UsageLine
+
+    chart = UsageChart()
+    chart.resize(800, 300)
+    days = [date(2026, 10, 1) + timedelta(days=n) for n in range(60)]
+    chart.show_lines([UsageLine("Desk", 0, [100] * 60)], days, "day", forecast_from=53)
+    moved = []
+    chart.view_changed.connect(lambda: moved.append(chart.start()))
+    assert chart.window_size() == 30 and chart.start() == chart.max_start() == 30  # parked on the forecast end
+    chart.set_start(-5)
+    assert chart.start() == 0 and moved == [0]
+    chart.set_start(999)
+    assert chart.start() == 30
+    chart._hover = 55
+    assert chart._readout(chart._plot_area())[1].endswith("forecast")
+    chart.show_lines([UsageLine("Desk", 0, [100] * 60)], days, "day", forecast_from=53)
+    assert chart.start() == 30  # a refresh keeps the view parked at the end
+    chart.set_start(10)
+    chart.show_lines([UsageLine("Desk", 0, [100] * 60)], days, "day", forecast_from=53)
+    assert chart.start() == 10  # and keeps a panned view where it was
+
+
+def test_live_chart_pans_back_and_shows_a_forecast_after_now(app):
+    from PySide6.QtTest import QTest
+    from ui.charts import Line, LiveChart
+
+    chart = LiveChart(120)
+    chart.resize(800, 300)
+    now = time.time()
+    times = [now - 7200 + i * 300 for i in range(25)]  # two hours of 5-minute readings
+    ahead = [(now + 900 * step / 12, 40.0) for step in range(1, 13)]
+    chart.show_lines([Line("Desk", times, [30.0] * 25, 0, (), ahead)], "t", 3600, 300)
+    assert chart._ahead > 0 and chart.can_pan()
+    assert chart._label_row()[-1][1].startswith("in ")  # the right edge is in the future
+    chart.show()
+    QTest.qWait(100)
+    chart._hover = chart._hover_at(chart._plot_area().right() - 5)
+    assert "forecast" in chart._readout(chart._plot_area())[1]
+    chart.close()
+    chart.pan_to(now - 3600)
+    assert chart._view_end_held is not None and chart._points[0]  # an earlier hour, still drawn
+    chart.pan_to(0)
+    assert chart._view_end == chart._earliest_end()  # never past the oldest reading
+    chart.show_lines([Line("Desk", times, [30.0] * 25, 0, (), ahead)], "t", 3600, 300)
+    assert chart._view_end_held is not None  # a refresh keeps the panned view
+    chart.show_lines([Line("Desk", times, [30.0] * 25, 0, (), ahead)], "t", 600, 5)
+    assert chart._view_end_held is None  # a new range starts at now
